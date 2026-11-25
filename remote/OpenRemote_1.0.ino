@@ -8618,12 +8618,24 @@ struct DeviceCommand {
   char *haService;      // "light.turn_on" - domain and service together
   char *haDataKey;      // optional single extra field, e.g. "brightness_pct"
   char *haStateOnValue; // the state that counts as "on" for this domain
+  char *haDataText;     // text value for haDataKey ("HDMI 2", a Roku key name)
   float haDataValue;
-  bool haHasData;
+  bool haHasData;       // haDataKey carries haDataValue (a number)
+  uint8_t haDataKind;   // HA_DATA_NONE / NUMBER / TEXT / TRUE / FALSE
   bool haShowState;     // whether this tile reports the entity's live state
   enum Kind : uint8_t { NONE, PARSED, RAW, BLE_HID, HOMEBRIDGE, ESPNOW, MQTT,
                         HOMEASSISTANT } kind;
 };
+
+// DeviceCommand::haDataKind - what, if anything, rides along in haDataKey.
+// Text and true/false values let a command pick an input
+// (media_player.select_source {"source": "HDMI 2"}), press a Roku key
+// (remote.send_command {"command": "home"}) or set mute.
+static const uint8_t HA_DATA_NONE = 0;
+static const uint8_t HA_DATA_NUMBER = 1;
+static const uint8_t HA_DATA_TEXT = 2;
+static const uint8_t HA_DATA_TRUE = 3;
+static const uint8_t HA_DATA_FALSE = 4;
 
 // ESP-NOW transport values for DeviceCommand::espNowTransport - what the
 // paired peer is expected to do with the payload once it arrives.
@@ -17367,7 +17379,7 @@ void clearRuntimeCommands() {
         free(devices[deviceIndex].commands[commandIndex].iconPath);
         devices[deviceIndex].commands[commandIndex].iconPath = nullptr;
       }
-      char **mqttStrings[8] = {
+      char **mqttStrings[9] = {
         &devices[deviceIndex].commands[commandIndex].mqttTopic,
         &devices[deviceIndex].commands[commandIndex].mqttPayload,
         &devices[deviceIndex].commands[commandIndex].mqttStateTopic,
@@ -17375,9 +17387,10 @@ void clearRuntimeCommands() {
         &devices[deviceIndex].commands[commandIndex].haEntityId,
         &devices[deviceIndex].commands[commandIndex].haService,
         &devices[deviceIndex].commands[commandIndex].haDataKey,
-        &devices[deviceIndex].commands[commandIndex].haStateOnValue
+        &devices[deviceIndex].commands[commandIndex].haStateOnValue,
+        &devices[deviceIndex].commands[commandIndex].haDataText
       };
-      for (uint8_t s = 0; s < 8; s++) {
+      for (uint8_t s = 0; s < 9; s++) {
         if (*mqttStrings[s]) {
           free(*mqttStrings[s]);
           *mqttStrings[s] = nullptr;
@@ -18858,8 +18871,14 @@ bool splitHomeAssistantService(const char *service, String &domain, String &acti
 String homeAssistantCallBody(const DeviceCommand &command) {
   JsonDocument body;
   body["entity_id"] = command.haEntityId;
-  if (command.haHasData && command.haDataKey && command.haDataKey[0]) {
-    body[command.haDataKey] = command.haDataValue;
+  if (command.haDataKey && command.haDataKey[0]) {
+    if (command.haDataKind == HA_DATA_TEXT && command.haDataText) {
+      body[command.haDataKey] = command.haDataText;
+    } else if (command.haDataKind == HA_DATA_TRUE || command.haDataKind == HA_DATA_FALSE) {
+      body[command.haDataKey] = command.haDataKind == HA_DATA_TRUE;
+    } else if (command.haHasData) {
+      body[command.haDataKey] = command.haDataValue;
+    }
   }
   String text;
   serializeJson(body, text);
@@ -19123,9 +19142,15 @@ bool transmitHomeAssistantCommand(const DeviceCommand &command) {
     return false;
   }
   if (!command.haEntityId || !command.haService) return false;
-  bool sent = homeAssistantShouldUseDock() ? callHomeAssistantViaDock(command)
-                                           : callHomeAssistantDirect(command);
-  if (sent && homeAssistantShouldUseDock()) flashEspNowCommandFeedback();
+  /* The dock's relay packet only has room for a numeric value, so a command
+     carrying text or true/false (an input, a Roku key, mute) goes direct. */
+  bool needsDirect = command.haDataKind == HA_DATA_TEXT ||
+                     command.haDataKind == HA_DATA_TRUE ||
+                     command.haDataKind == HA_DATA_FALSE;
+  bool viaDock = homeAssistantShouldUseDock() && !needsDirect;
+  bool sent = viaDock ? callHomeAssistantViaDock(command)
+                      : callHomeAssistantDirect(command);
+  if (sent && viaDock) flashEspNowCommandFeedback();
   return sent;
 }
 
@@ -20325,8 +20350,19 @@ void loadRuntimeModel(JsonDocument &doc) {
         runtimeCommand.haDataKey = duplicateRuntimeString(String(assistant["dataKey"] | ""));
         runtimeCommand.haStateOnValue = duplicateRuntimeString(String(assistant["onState"] | "on"));
         runtimeCommand.haShowState = assistant["showState"] | true;
-        runtimeCommand.haHasData = assistant["value"].is<float>();
-        runtimeCommand.haDataValue = assistant["value"] | 0.0f;
+        runtimeCommand.haHasData = false;
+        runtimeCommand.haDataKind = HA_DATA_NONE;
+        JsonVariantConst haValue = assistant["value"];
+        if (haValue.is<bool>()) {
+          runtimeCommand.haDataKind = haValue.as<bool>() ? HA_DATA_TRUE : HA_DATA_FALSE;
+        } else if (haValue.is<float>()) {
+          runtimeCommand.haHasData = true;
+          runtimeCommand.haDataKind = HA_DATA_NUMBER;
+          runtimeCommand.haDataValue = haValue.as<float>();
+        } else if (haValue.is<const char *>()) {
+          runtimeCommand.haDataText = duplicateRuntimeString(String(haValue.as<const char *>()));
+          if (runtimeCommand.haDataText) runtimeCommand.haDataKind = HA_DATA_TEXT;
+        }
         if (runtimeCommand.haEntityId && runtimeCommand.haService) {
           runtimeCommand.kind = DeviceCommand::HOMEASSISTANT;
         }
@@ -29073,7 +29109,8 @@ bool homeAssistantDomainIsControllable(const char *entityId) {
   static const char *allowed[] = {
     "light.", "switch.", "fan.", "cover.", "climate.", "media_player.",
     "scene.", "script.", "input_boolean.", "automation.", "vacuum.",
-    "lock.", "button.", "humidifier.", "water_heater.", "siren."
+    "lock.", "button.", "humidifier.", "water_heater.", "siren.",
+    "remote."   // e.g. the Roku integration's keypad: remote.send_command
   };
   if (!entityId) return false;
   for (uint8_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
@@ -29270,6 +29307,9 @@ void handleHomeAssistantDiscover() {
   entity["entity_id"] = true;
   entity["state"] = true;
   entity["attributes"]["friendly_name"] = true;
+  // A receiver's inputs, or a Roku's apps, so WebConfig can offer one
+  // select_source button per entry.
+  entity["attributes"]["source_list"] = true;
 
   JsonDocument source(&psramJsonAllocator);
   WatchdogFriendlyStream haStream(http.getStream());
@@ -29306,6 +29346,17 @@ void handleHomeAssistantDiscover() {
     output["state"] = item["state"] | "";
     output["onService"] = homeAssistantDefaultService(entityId, true);
     output["offService"] = homeAssistantDefaultService(entityId, false);
+    JsonArrayConst sourceList = item["attributes"]["source_list"].as<JsonArrayConst>();
+    if (!sourceList.isNull() && sourceList.size()) {
+      JsonArray sources = output["sources"].to<JsonArray>();
+      uint8_t kept = 0;
+      for (JsonVariantConst entry : sourceList) {
+        const char *sourceName = entry | "";
+        if (!sourceName[0]) continue;
+        sources.add(sourceName);
+        if (++kept >= 40) break;   // a Roku can list hundreds of apps
+      }
+    }
   }
   response["total"] = total;
   response["skipped"] = skipped;

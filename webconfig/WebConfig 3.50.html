@@ -8327,6 +8327,48 @@
     return "on";
   }
 
+  /*
+    The extra buttons an AV entity gets beyond On/Off, so a receiver or Roku
+    in a cabinet can be run over Home Assistant instead of IR.
+
+    media_player: volume, mute, transport, and one select_source button per
+    entry in the entity's source_list (a receiver's inputs, a Roku's apps).
+    remote.* from the Roku integration: the Roku keypad via
+    remote.send_command. Other remote.* integrations name their keys
+    differently, so they keep just On/Off.
+
+    Text and true/false values need firmware that sends them (homeAssistant
+    "value" as a string or boolean); older firmware ignores those buttons.
+  */
+  function haExtraCommandsFor(entity){
+    var id=String(entity && entity.entityId || "");
+    var name=String(entity && entity.name || "");
+    var extras=[];
+    if(id.indexOf("media_player.")===0){
+      extras.push({name:"Volume Up",service:"media_player.volume_up"});
+      extras.push({name:"Volume Down",service:"media_player.volume_down"});
+      extras.push({name:"Mute",service:"media_player.volume_mute",dataKey:"is_volume_muted",value:true});
+      extras.push({name:"Unmute",service:"media_player.volume_mute",dataKey:"is_volume_muted",value:false});
+      extras.push({name:"Play/Pause",service:"media_player.media_play_pause"});
+      extras.push({name:"Next",service:"media_player.media_next_track"});
+      extras.push({name:"Previous",service:"media_player.media_previous_track"});
+      (Array.isArray(entity.sources) ? entity.sources : []).forEach(function(source){
+        source=String(source||"").trim();
+        if(source) extras.push({name:source,service:"media_player.select_source",dataKey:"source",value:source});
+      });
+    }else if(id.indexOf("remote.")===0 && /roku/i.test(id+" "+name)){
+      [["Up","up"],["Down","down"],["Left","left"],["Right","right"],["OK","select"],
+       ["Back","back"],["Home","home"],["Play/Pause","play"],["Rewind","reverse"],
+       ["Fast Forward","forward"],["Replay","replay"],["Info","info"],["Search","search"],
+       ["Volume Up","volume_up"],["Volume Down","volume_down"],["Mute","volume_mute"],
+       ["Channel Up","channel_up"],["Channel Down","channel_down"],["Power","power"]
+      ].forEach(function(key){
+        extras.push({name:key[0],service:"remote.send_command",dataKey:"command",value:key[1]});
+      });
+    }
+    return extras;
+  }
+
   function dockIsPaired(){
     return !!(espNowKnownDevices && espNowKnownDevices.length);
   }
@@ -8563,6 +8605,12 @@
                          onState:onState,showState:true}
         });
       }
+      haExtraCommandsFor(entity).forEach(function(extra,index){
+        var call={entityId:entity.entityId,service:extra.service,
+                  onState:onState,showState:false};
+        if(extra.dataKey){ call.dataKey=extra.dataKey; call.value=extra.value; }
+        commands.push({id:"hacmd_"+stamp+"_"+added+"_x"+index,name:extra.name,homeAssistant:call});
+      });
       addedDevices.push({
         id:"ha_"+stamp+"_"+added,
         name:entity.name || entity.entityId,
