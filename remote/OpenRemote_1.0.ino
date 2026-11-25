@@ -9269,6 +9269,9 @@ uint8_t buttonTextSize = 16;
 uint8_t activityIconSize = 52;
 uint8_t activityTextSize = 20;
 bool buttonBoxesEnabled = true;
+// Device pages draw their commands as a 3-column grid, or - with this on - as
+// one full-width button per row so long labels stay on a single line.
+bool devicePageListLayout = false;
 bool activityBoxesEnabled = true;
 char activitiesThemePath[72] = "";
 
@@ -17298,6 +17301,7 @@ void applySettingsJson(JsonVariantConst settings) {
   activityIconSize = constrain((int)(settings["activityIconSize"] | activityIconSize), 20, 64);
   activityTextSize = constrain((int)(settings["activityTextSize"] | activityTextSize), 10, 24);
   buttonBoxesEnabled = settings["buttonBoxesEnabled"] | buttonBoxesEnabled;
+  devicePageListLayout = settings["devicePageListLayout"] | devicePageListLayout;
   activityBoxesEnabled = settings["activityBoxesEnabled"] | activityBoxesEnabled;
   // See persistSettingsToRuntimeConfig() for why these are here. Each is range
   // checked rather than trusted: this JSON can come from a hand-edited backup
@@ -20932,6 +20936,7 @@ bool persistSettingsToRuntimeConfig() {
   settings["activityIconSize"] = activityIconSize;
   settings["activityTextSize"] = activityTextSize;
   settings["buttonBoxesEnabled"] = buttonBoxesEnabled;
+  settings["devicePageListLayout"] = devicePageListLayout;
   settings["activityBoxesEnabled"] = activityBoxesEnabled;
   settings["remoteName"] = remoteName;
   /*
@@ -39448,10 +39453,15 @@ void refreshLiveTiles() {
   for (uint8_t i = 0; i < liveTileBindingCount; i++) applyLiveTileState(liveTileBindings[i]);
 }
 
+// When >= 0, the next makeTile() call draws a full-width list row at this row
+// instead of a grid tile at its slot. Only renderDevicePage() sets it.
+int16_t makeTileListRow = -1;
+
 void makeTile(uint8_t slot, const char *label, const char *iconPath, bool showText,
               uint8_t boxMode, bool repeat, DeviceCommand *command, Macro *macro) {
-  uint8_t col = slot % 3;
-  uint8_t row = slot / 3;
+  bool listRow = makeTileListRow >= 0;
+  uint8_t col = listRow ? 0 : slot % 3;
+  uint8_t row = listRow ? (uint8_t)makeTileListRow : slot / 3;
   bool showsLiveState = command &&
     ((command->kind == DeviceCommand::MQTT &&
       command->mqttStateTopic && command->mqttStateTopic[0]) ||
@@ -39465,7 +39475,8 @@ void makeTile(uint8_t slot, const char *label, const char *iconPath, bool showTe
 
   lv_color_t tileColour = activeRuntimeThemeStyle
     ? lv_color_hex(activeRuntimeThemeStyle->glassColour) : lvRgb(76, 48, 38);
-  lv_obj_t *tile = makeButton(content, "", x, y, 68, 44, tileColour);
+  int tileWidth = listRow ? 76 * 2 + 68 : 68;
+  lv_obj_t *tile = makeButton(content, "", x, y, tileWidth, 44, tileColour);
   registerSplitDiagnosticAnchor(tile);
   bool themeAllowsBoundary = !activeRuntimeThemeStyle || activeRuntimeThemeStyle->glassEnabled;
   bool showBox = boxMode == 1 ||
@@ -39488,7 +39499,35 @@ void makeTile(uint8_t slot, const char *label, const char *iconPath, bool showTe
   }
   lv_obj_add_event_cb(tile, tileEvent, LV_EVENT_ALL, binding);
 
-  if (!showText && iconPath && iconPath[0]) {
+  if (listRow) {
+    // One line per button: icon (if any) on the left, the label beside it,
+    // a live value (if any) on the right. Labels too long get "..." not wraps.
+    int textX = 10;
+    bool hasIcon = iconPath && iconPath[0];
+    if (hasIcon) {
+      lv_obj_t *icon = lv_img_create(tile);
+      lv_img_set_src(icon, cachedPageIconSource(iconPath));
+      int listIconPixels = min(iconPixels, 32);
+      lv_img_set_zoom(icon, (uint16_t)(256UL * listIconPixels / 64UL));
+      // The image keeps its 64px box when zoomed, so centre that box on
+      // where the shrunken icon should sit.
+      lv_obj_align(icon, LV_ALIGN_LEFT_MID, 6 + listIconPixels / 2 - 32, 0);
+      lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+      textX = 12 + listIconPixels;
+    }
+    if (showText || !hasIcon || (label && label[0])) {
+      lv_obj_t *l = lv_label_create(tile);
+      lv_label_set_text(l, label ? label : "");
+      lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+      lv_obj_set_width(l, tileWidth - textX - (showsLiveState ? 72 : 10));
+      lv_obj_set_style_text_font(l, fontForSize(buttonTextSize), 0);
+      lv_obj_set_style_text_color(l, textPrimary(), 0);
+      lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_LEFT, 0);
+      lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_clear_flag(l, LV_OBJ_FLAG_SCROLLABLE);
+      lv_obj_align(l, LV_ALIGN_LEFT_MID, textX, 0);
+    }
+  } else if (!showText && iconPath && iconPath[0]) {
     lv_obj_t *icon = lv_img_create(tile);
     lv_img_set_src(icon, cachedPageIconSource(iconPath));
     lv_img_set_zoom(icon, (uint16_t)(256UL * iconPixels / 64UL));
@@ -39514,8 +39553,13 @@ void makeTile(uint8_t slot, const char *label, const char *iconPath, bool showTe
     lv_label_set_long_mode(value, LV_LABEL_LONG_DOT);
     lv_obj_set_width(value, 60);
     lv_obj_set_style_text_font(value, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(value, LV_ALIGN_BOTTOM_MID, 0, 1);
+    if (listRow) {
+      lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, 0);
+      lv_obj_align(value, LV_ALIGN_RIGHT_MID, -8, 0);
+    } else {
+      lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_CENTER, 0);
+      lv_obj_align(value, LV_ALIGN_BOTTOM_MID, 0, 1);
+    }
     lv_obj_clear_flag(value, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(value, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -42854,6 +42898,43 @@ void renderDevicePage() {
   }
 
   uint8_t count = devices[activeDevice].commandCount;
+
+  if (devicePageListLayout) {
+    // List layout: the page's commands in slot order (left-to-right,
+    // top-to-bottom as laid out in WebConfig), one per row, flowing around
+    // any widget rows rather than over them.
+    static uint8_t order[MAX_DEVICE_COMMANDS];
+    uint8_t onPage = 0;
+    for (uint8_t i = 0; i < count; i++) {
+      uint8_t slot = devices[activeDevice].commands[i].slot;
+      if (slot == DEVICE_COMMAND_NOT_ON_PAGE) continue;
+      uint8_t at = onPage++;
+      while (at > 0 && devices[activeDevice].commands[order[at - 1]].slot > slot) {
+        order[at] = order[at - 1];
+        at--;
+      }
+      order[at] = i;
+    }
+    static bool widgetRow[256];
+    memset(widgetRow, 0, sizeof(widgetRow));
+    for (uint8_t w = 0; w < devices[activeDevice].widgetCount; w++) {
+      uint8_t wr = devices[activeDevice].widgets[w].slot / 3;
+      widgetRow[wr] = true;
+      if (!devices[activeDevice].widgets[w].slim && wr < 255) widgetRow[wr + 1] = true;
+    }
+    uint16_t row = 0;
+    for (uint8_t k = 0; k < onPage; k++) {
+      while (row < 255 && widgetRow[row]) row++;
+      if (row >= 255) break;
+      DeviceCommand &c = devices[activeDevice].commands[order[k]];
+      makeTileListRow = (int16_t)row++;
+      makeTile(c.slot, c.label, c.iconPath ? c.iconPath : "", c.showText, c.boxMode,
+               c.repeatDefault, &c, nullptr);
+    }
+    makeTileListRow = -1;
+    count = 0;   // skip the grid loop below
+  }
+
   for (uint8_t i = 0; i < count; i++) {
     // Still a command - activities and the physical buttons can use it -
     // just not a button on this page.

@@ -4683,6 +4683,13 @@
                 </div>
                 <label class="switch"><input type="checkbox" id="buttonBoxesEnabled" checked><span></span></label>
               </div>
+              <div class="settingRow">
+                <div>
+                  <div class="settingName">Device Pages as List</div>
+                  <div class="settingHint">On the remote, show each device's buttons one per row, full width, instead of the 3-column grid. Order follows the grid, left to right then down. (This preview still shows the grid.)</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="devicePageListLayout"><span></span></label>
+              </div>
               <div class="sliderItem settingsGroupSlider">
                 <div class="sliderHead"><span>Icon Size</span><b id="buttonIconSizeVal">52 px</b></div>
                 <input class="range" id="buttonIconSize" type="range" min="20" max="64" value="52">
@@ -8037,6 +8044,7 @@
   var activityIconSizeRange=document.getElementById("activityIconSize");
   var activityTextSizeRange=document.getElementById("activityTextSize");
   var buttonBoxesEnabled=document.getElementById("buttonBoxesEnabled");
+  var devicePageListLayout=document.getElementById("devicePageListLayout");
   var activityBoxesEnabled=document.getElementById("activityBoxesEnabled");
   var pages=[
     {name:"Remote Settings",pageType:"settings",items:[],locked:true,theme:"simple"},
@@ -9010,6 +9018,7 @@
       activityIconSize:Number(activityIconSizeRange && activityIconSizeRange.value)||52,
       activityTextSize:Number(activityTextSizeRange && activityTextSizeRange.value)||20,
       buttonBoxesEnabled:!buttonBoxesEnabled || !!buttonBoxesEnabled.checked,
+      devicePageListLayout:!!(devicePageListLayout && devicePageListLayout.checked),
       activityBoxesEnabled:!activityBoxesEnabled || !!activityBoxesEnabled.checked
     };
     Object.keys(owned).forEach(function(key){ merged[key]=owned[key]; });
@@ -20609,6 +20618,8 @@
     if(sleepTimer) sleepTimer.value="25";
     if(wake) wake.value="58";
     if(buttonBoxes) buttonBoxes.checked=true;
+    var listLayout=document.getElementById("devicePageListLayout");
+    if(listLayout) listLayout.checked=false;
     if(buttonIcon) buttonIcon.value="52";
     if(buttonText) buttonText.value="19";
     if(activityBoxes) activityBoxes.checked=true;
@@ -22286,6 +22297,7 @@
           if(pair[0] && pair[1]!==undefined){ pair[0].value=pair[1]; pair[0].dispatchEvent(new Event("input",{bubbles:true})); }
         });
         if(buttonBoxesEnabled && data.settings.buttonBoxesEnabled!==undefined) buttonBoxesEnabled.checked=!!data.settings.buttonBoxesEnabled;
+        if(devicePageListLayout) devicePageListLayout.checked=!!data.settings.devicePageListLayout;
         if(activityBoxesEnabled && data.settings.activityBoxesEnabled!==undefined) activityBoxesEnabled.checked=!!data.settings.activityBoxesEnabled;
       }
       var staleDeviceReferencesRemoved=pruneOrphanDeviceReferences();
