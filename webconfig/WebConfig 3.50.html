@@ -12522,7 +12522,12 @@
        the whole phrase is what discarded them. */
     var compactSearch=function(text){ return text.replace(/[^a-z0-9]/g,""); };
     var qTerms=q.split(/\s+/).filter(function(term){ return term; });
-    var matches=irDatabase.filter(function(d){
+    /* The remote has already matched these results against this exact query
+       (including fields this page never sees, like the source name), so show
+       them all. The filter below only narrows stale results while the user is
+       still typing and the next search has not come back yet. */
+    var resultsAreForQuery=remoteIrdbResultsQuery!==null && q===remoteIrdbResultsQuery;
+    var matches=resultsAreForQuery ? irDatabase.slice() : irDatabase.filter(function(d){
       var hay=(d.brand+" "+d.model+" "+d.type+" "+d.protocol+" "+d.commands.join(" ")).toLowerCase();
       var hayCompact=compactSearch(hay);
       return !qTerms.length || qTerms.every(function(term){
@@ -22001,6 +22006,8 @@
   // The search in flight. A newer keystroke aborts it, and the remote stops
   // reading the SD card for a page that is no longer listening.
   var remoteIrdbSearchAbort=null;
+  // The lowercased query the current irDatabase results were returned for.
+  var remoteIrdbResultsQuery=null;
 
   function loadRemoteIrdb(){
     var count=document.getElementById("irdbCount");
@@ -22036,6 +22043,7 @@
       if(progressFill) progressFill.style.width="100%";
       var imported=(Array.isArray(data.results) ? data.results : []).map(normalizeRemoteIrdbDevice);
       irDatabase=imported;
+      remoteIrdbResultsQuery=query.toLowerCase();
       nativeIrdbFileName="OpenRemote.irdb";
       renderIrdb();
       updateBackupCounts();
