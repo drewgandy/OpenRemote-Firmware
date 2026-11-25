@@ -23,10 +23,10 @@ jobs:
           path: |
             ~/.platformio
             ~/.cache/pip
-          key: pio-6.1.18-${{ runner.os }}-${{ hashFiles('remote/platformio.ini') }}
+          key: pio-6.1.19-${{ runner.os }}-${{ hashFiles('remote/platformio.ini') }}
 
       - name: Install PlatformIO
-        run: pip install "platformio==6.1.18"
+        run: pip install "platformio==6.1.19"
 
       - name: Build
         working-directory: remote
