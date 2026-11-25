@@ -1,0 +1,44 @@
+name: Build remote firmware
+
+on:
+  push:
+    paths:
+      - "remote/**"
+      - ".github/workflows/build-remote.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('remote/platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build
+        working-directory: remote
+        run: pio run -e openremote_rev5
+
+      - name: Collect firmware
+        run: |
+          mkdir -p out
+          cp remote/.pio/build/openremote_rev5/firmware.bin "out/OpenRemote-Remote-Firmware-${GITHUB_SHA::7}.bin"
+          cp remote/.pio/build/openremote_rev5/firmware.elf "out/OpenRemote-Remote-Firmware-${GITHUB_SHA::7}.elf"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openremote-remote-firmware
+          path: out/
