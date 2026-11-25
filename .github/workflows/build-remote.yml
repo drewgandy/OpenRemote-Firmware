@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "remote/**"
+      - "webconfig/**"
       - ".github/workflows/build-remote.yml"
   workflow_dispatch:
 
@@ -39,6 +40,7 @@ jobs:
           mkdir -p out
           cp remote/.pio/build/openremote_rev5/firmware.bin "out/OpenRemote-Remote-Firmware-${GITHUB_SHA::7}.bin"
           cp remote/.pio/build/openremote_rev5/firmware.elf "out/OpenRemote-Remote-Firmware-${GITHUB_SHA::7}.elf"
+          cp "webconfig/WebConfig 3.50.html" "out/OpenRemote-WebConfig-3.50-${GITHUB_SHA::7}.html"
 
       - uses: actions/upload-artifact@v4
         with:
