@@ -1421,6 +1421,45 @@ static int8_t npMappedKeyFor(const NpSourceSettings &half, const DeviceCommand &
   return -1;
 }
 
+/* Whether a command reads as a volume key, wherever it is going: "Volume Up",
+   "VOL-", "Mute", a Roku's remote volume_up key, a Homebridge VolumeSelector.
+   Returns the pop-up's action text, or nullptr. */
+static const char *npVolumeKeyAction(const DeviceCommand &command) {
+  auto classify = [](const char *text) -> const char * {
+    if (!text || !text[0]) return nullptr;
+    char lower[48];
+    size_t n = 0;
+    for (const char *c = text; *c && n < sizeof(lower) - 1; c++) lower[n++] = (char)tolower((unsigned char)*c);
+    lower[n] = '\0';
+    if (strstr(lower, "mute")) return "Mute";
+    bool volume = strstr(lower, "vol") != nullptr;
+    if (!volume) return nullptr;
+    if (strstr(lower, "up") || strchr(lower, '+')) return "Volume up";
+    if (strstr(lower, "down") || strchr(lower, '-')) return "Volume down";
+    return "Volume";
+  };
+  if (command.kind == DeviceCommand::HOMEASSISTANT && command.haService) {
+    const char *service = command.haService;
+    if (!strncmp(service, "media_player.volume_", 20)) {
+      if (!strcmp(service + 20, "up")) return "Volume up";
+      if (!strcmp(service + 20, "down")) return "Volume down";
+      if (!strcmp(service + 20, "mute")) return "Mute";
+      return "Volume";
+    }
+    // remote.send_command with command: volume_up (a Roku, an Apple TV)
+    if (!strcmp(service, "remote.send_command")) {
+      const char *action = classify(command.haDataText);
+      if (action) return action;
+    }
+  }
+  if (command.kind == DeviceCommand::HOMEBRIDGE) {
+    const char *c = command.homebridgeCharacteristic;
+    if (!strcmp(c, "VolumeSelector")) return command.homebridgeValue >= 0.5f ? "Volume down" : "Volume up";
+    if (!strcmp(c, "Mute")) return "Mute";
+  }
+  return classify(command.label);
+}
+
 /*
   Every command the remote sends passes through here once sent, whichever
   page, key or transport it came from - so a hardware volume key mapped to
@@ -1463,6 +1502,13 @@ void nowPlayingNoteCommand(const DeviceCommand &command, bool sent) {
       else if (!strcmp(c, "Mute")) action = "Mute";
       else if (!strcmp(c, "Volume")) action = "Volume";
     }
+  }
+  // One remote per room: a volume key aimed anywhere - the TV's or the
+  // Roku's own volume keys, which reach the receiver over HDMI-CEC - still
+  // changes this room's volume. Show it, and read the receiver back.
+  if (!action) {
+    action = npVolumeKeyAction(command);
+    if (action) forVolume = true;
   }
   if (forMedia) npRequestRefresh(true, false);
   if (forVolume) npRequestRefresh(false, true);
@@ -2217,9 +2263,18 @@ void npHideVolumePopup() {
 bool nowPlayingFullOnScreen();
 
 void npShowVolumePopup(const char *action) {
-  if (!npSettings.volumePopup || !npHalfActive(npSettings.volume)) return;
+  if (!npSettings.volumePopup || !npHalfActive(npSettings.volume)) {
+    Serial.printf("Now Playing: no pop-up for %s (%s)\n", action ? action : "volume",
+                  !npSettings.volumePopup ? "switched off" : "no volume device set");
+    return;
+  }
   // The open widget, or a full-size one on the page, already shows the level.
-  if (nowPlayingFullOnScreen()) return;
+  if (nowPlayingFullOnScreen()) {
+    Serial.printf("Now Playing: no pop-up for %s (the full widget is on screen)\n",
+                  action ? action : "volume");
+    return;
+  }
+  if (!npPopup) Serial.printf("Now Playing: pop-up for %s\n", action ? action : "volume");
   strlcpy(npPopupAction, action ? action : "Volume", sizeof(npPopupAction));
   npPopupUntilMs = millis() + 2200UL;
   if (!npPopup || !lv_obj_is_valid(npPopup)) {
