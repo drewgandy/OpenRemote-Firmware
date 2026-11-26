@@ -1628,68 +1628,74 @@ static void npBuildVolumeRow(NowPlayingUi *ui, lv_obj_t *panel, int width, int y
 }
 
 /*
-  Two and three rows: the media half's pieces move to suit what the player
-  actually reports. Without artwork the text takes the whole width; without
+  Two and three rows: one layout, three rows being the same thing with more
+  room and larger type. The media half's pieces move to suit what the player
+  actually reports - without artwork the text takes the whole width; without
   a position the progress row is dropped and the text sits lower.
 */
+struct NpFlowMetrics {
+  const lv_font_t *title;
+  const lv_font_t *line;
+  int titleH;      // line height of the title font
+  int lineH;
+  int art;         // artwork side, with and without a progress row
+  int artTimed;
+};
+
+static NpFlowMetrics npFlowMetrics(const NowPlayingUi *ui) {
+  if (ui->layout == NP_LAYOUT_THREE) {
+    return { &lv_font_montserrat_20, &lv_font_montserrat_14, 24, 17, 64, 52 };
+  }
+  return { &lv_font_montserrat_16, &lv_font_montserrat_12, 20, 15, 40, 30 };
+}
+
 static void npReflow(NowPlayingUi *ui, bool art, bool timed) {
   if (ui->layout != NP_LAYOUT_TWO && ui->layout != NP_LAYOUT_THREE) return;
   if (!ui->hasMedia || !ui->mediaPanel) return;
   if (ui->flowArt == (int8_t)art && ui->flowTimed == (int8_t)timed) return;
   ui->flowArt = (int8_t)art;
   ui->flowTimed = (int8_t)timed;
+  const NpFlowMetrics f = npFlowMetrics(ui);
   const int w = ui->width;
-  const bool three = ui->layout == NP_LAYOUT_THREE;
   const int mediaH = lv_obj_get_height(ui->mediaPanel);
-  int artSize = three ? 64 : (timed ? 30 : 40);
-  if (!ui->hasVolume) artSize = three ? 96 : 72;
-  int artY = three || !ui->hasVolume ? 8 : 6;
+  const int progressH = timed ? 15 : 0;
+  const int blockH = f.titleH + f.lineH + progressH;
+  int artSize = timed ? f.artTimed : f.art;
+  // Media only: the artwork can grow, but not past the 96px it is stored at.
+  if (!ui->hasVolume) artSize = min(mediaH - 16, min((int)NP_ART_SIZE, artSize * 2));
+  int top = max(4, (mediaH - max(blockH, art ? artSize : 0)) / 2);
   npSetHidden(ui->artBox, !art);
   if (art && ui->artBox) {
-    lv_obj_set_pos(ui->artBox, 10, artY);
+    lv_obj_set_pos(ui->artBox, 10, (mediaH - artSize) / 2);
     lv_obj_set_size(ui->artBox, artSize, artSize);
     ui->artSize = (int16_t)artSize;
     ui->artShown = (const void *)1;   // re-apply the zoom for the new size
   }
   int textX = art ? 10 + artSize + 10 : 10;
   int textW = w - textX - 10;
-  // Text block: title (16 px) and one line under it (12 px).
-  int blockH = 40;
-  int progressH = timed ? 16 : 0;
-  int textY;
-  if (three) {
-    textY = art ? artY + 4 : 10;
-  } else if (!ui->hasVolume) {
-    textY = (mediaH - blockH - progressH) / 2;
-  } else {
-    textY = timed ? 4 : 8;
-  }
+  int textY = art ? (mediaH - blockH) / 2 : top;
   lv_obj_set_pos(ui->title, textX, textY);
   lv_obj_set_width(ui->title, textW);
-  lv_obj_set_pos(ui->subtitle, textX, textY + 21);
+  lv_obj_set_pos(ui->subtitle, textX, textY + f.titleH);
   lv_obj_set_width(ui->subtitle, textW);
   if (timed) {
-    // On one line: elapsed, the bar, remaining - full width on three rows,
-    // beside the artwork on two.
-    int rowX = three ? 10 : textX;
-    int rowW = three ? w - 20 : textW;
-    int rowY = three ? (art ? artY + artSize + 8 : textY + 46) : textY + 38;
-    if (!three && !ui->hasVolume) rowY = textY + blockH + 2;
-    lv_obj_set_pos(ui->left, rowX, rowY);
-    lv_obj_set_pos(ui->right, rowX + rowW - 40, rowY);
-    ui->trackWidth = (int16_t)(rowW - 84);
-    lv_obj_set_pos(ui->track, rowX + 42, rowY + 5);
+    // On one line: elapsed, the bar, remaining.
+    int rowY = textY + f.titleH + f.lineH + 1;
+    lv_obj_set_pos(ui->left, textX, rowY);
+    lv_obj_set_pos(ui->right, textX + textW - 40, rowY);
+    ui->trackWidth = (int16_t)(textW - 84);
+    lv_obj_set_pos(ui->track, textX + 42, rowY + 5);
     lv_obj_set_width(ui->track, ui->trackWidth);
   }
 }
 
 static void npBuildMediaText(NowPlayingUi *ui, lv_obj_t *panel) {
   const lv_color_t muted = widgetMutedColour();
-  npBuildArt(ui, panel, 10, 6, 40);
-  ui->title = npScrollingLabel(panel, 10, 8, ui->width - 20, &lv_font_montserrat_16,
-                               textPrimary(), LV_TEXT_ALIGN_LEFT);
-  ui->subtitle = makeWidgetLabel(panel, "", 10, 29, &lv_font_montserrat_12, muted,
-                                 ui->width - 20);
+  const NpFlowMetrics f = npFlowMetrics(ui);
+  npBuildArt(ui, panel, 10, 6, f.art);
+  ui->title = npScrollingLabel(panel, 10, 8, ui->width - 20, f.title, textPrimary(),
+                               LV_TEXT_ALIGN_LEFT);
+  ui->subtitle = makeWidgetLabel(panel, "", 10, 29, f.line, muted, ui->width - 20);
   ui->track = npTrack(panel, 52, 50, 120, 3, npAccent(), &ui->fill);
   ui->trackWidth = 120;
   ui->left = makeWidgetLabel(panel, "", 10, 45, &lv_font_montserrat_10, muted, 40);
@@ -1697,20 +1703,25 @@ static void npBuildMediaText(NowPlayingUi *ui, lv_obj_t *panel) {
                               LV_TEXT_ALIGN_RIGHT);
 }
 
-/* The volume half of the two- and three-row faces. */
+/* The volume half of the two- and three-row faces: icon, name over input and
+   sound mode, the level large on the right. */
 static void npBuildVolumeBlock(NowPlayingUi *ui, lv_obj_t *parent, int y, int h, bool big) {
   const lv_color_t muted = widgetMutedColour();
   const int w = ui->width;
-  int nameY = y + (h - (big ? 38 : 34)) / 2;
-  ui->volIcon = makeLabel(parent, LV_SYMBOL_VOLUME_MAX, 10, nameY + (big ? 9 : 8),
-                          big ? &lv_font_montserrat_18 : &lv_font_montserrat_16, npVolumeColour());
-  ui->volLabel = makeWidgetLabel(parent, "", 34, nameY, big ? &lv_font_montserrat_16
-                                                            : &lv_font_montserrat_14,
-                                 textPrimary(), w - 34 - 96);
-  ui->volDetail = makeWidgetLabel(parent, "", 34, nameY + (big ? 21 : 18), &lv_font_montserrat_12,
-                                  muted, w - 34 - 96);
-  ui->volValue = makeWidgetLabel(parent, "--", w - 102, y + (h - 28) / 2, &lv_font_montserrat_24,
-                                 textPrimary(), 92, LV_TEXT_ALIGN_RIGHT);
+  const int nameH = big ? 22 : 18;
+  const int detailH = big ? 17 : 15;
+  int nameY = y + (h - nameH - detailH) / 2;
+  ui->volIcon = makeLabel(parent, LV_SYMBOL_VOLUME_MAX, 10, nameY + (nameH + detailH) / 2 - (big ? 11 : 9),
+                          big ? &lv_font_montserrat_20 : &lv_font_montserrat_16, npVolumeColour());
+  int textX = big ? 38 : 34;
+  ui->volLabel = makeWidgetLabel(parent, "", textX, nameY,
+                                 big ? &lv_font_montserrat_18 : &lv_font_montserrat_14,
+                                 textPrimary(), w - textX - 100);
+  ui->volDetail = makeWidgetLabel(parent, "", textX, nameY + nameH,
+                                  big ? &lv_font_montserrat_14 : &lv_font_montserrat_12,
+                                  muted, w - textX - 100);
+  ui->volValue = makeWidgetLabel(parent, "--", w - 104, y + (h - 28) / 2, &lv_font_montserrat_24,
+                                 textPrimary(), 94, LV_TEXT_ALIGN_RIGHT);
 }
 
 /*
@@ -1775,7 +1786,8 @@ NowPlayingUi *buildNowPlayingFace(lv_obj_t *parent, int width, int height, bool 
   if (ui->layout == NP_LAYOUT_TWO || ui->layout == NP_LAYOUT_THREE) {
     bool three = ui->layout == NP_LAYOUT_THREE;
     if (ui->hasMedia) {
-      int mediaH = ui->hasVolume ? (three ? 96 : 52) : height;
+      // The media half takes a little over half; the volume half the rest.
+      int mediaH = ui->hasVolume ? (three ? 84 : 52) : height;
       ui->mediaPanel = npBox(parent, 0, 0, width, mediaH);
       npBuildMediaText(ui, ui->mediaPanel);
       if (ui->hasVolume) {

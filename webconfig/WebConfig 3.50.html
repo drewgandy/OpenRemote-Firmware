@@ -3394,9 +3394,14 @@
 .wgNpGreen{font-size:calc(11px * var(--wgScale));color:#7fd6a8}
 .wgNowPlaying .wgNpTitle{font-size:calc(16px * var(--wgScale))}
 .wgNpVolName{font-size:calc(14px * var(--wgScale));font-weight:800;color:#fff}
-.wgNpRows3 .wgNpVolName{font-size:calc(16px * var(--wgScale))}
 .wgNowPlaying .wgNpLevel{font-size:calc(22px * var(--wgScale));font-weight:800}
-.wgNpRows3 .wgNpArt{width:calc(64px * var(--wgScale));height:calc(64px * var(--wgScale))}
+.wgNpRows3 .wgNpArt{width:calc(52px * var(--wgScale));height:calc(52px * var(--wgScale))}
+.wgNpRows3 .wgNpTitle{font-size:calc(20px * var(--wgScale))}
+.wgNpRows3 .wgNpText .wgSource{font-size:calc(14px * var(--wgScale))}
+.wgNpRows3 .wgNpVolText .wgSource{font-size:calc(14px * var(--wgScale))}
+.wgNpRows3 .wgNpVolName{font-size:calc(18px * var(--wgScale))}
+.wgNpRows3 .wgNpLevel{font-size:calc(24px * var(--wgScale))}
+.wgNpRows3 .wgNpVolume{flex:1 1 auto}
 .wgNpProgress{display:flex;align-items:center;gap:calc(5px * var(--wgScale));font-size:calc(10px * var(--wgScale));color:rgba(255,255,255,.56)}
 .wgNpProgress .wgBar{flex:1 1 auto;margin:0}
 .wgNpFull{align-items:stretch}
@@ -7300,8 +7305,7 @@
     }
     return '<div class="'+cls+(hasVolume ? '' : ' wgNpNoVolume')+'"'+style+'>'+
       '<div class="wgNpMedia"><div class="wgNpArt"></div><div class="wgNpText">'+
-        '<div class="wgNpTitle">Title</div><div class="wgSource">'+mediaName+' &middot; Playing</div>'+(rows===2 ? progress : '')+'</div></div>'+
-      (rows===3 ? progress : '')+
+        '<div class="wgNpTitle">Title</div><div class="wgSource">'+mediaName+' &middot; Playing</div>'+progress+'</div></div>'+
       (hasVolume ? volumeBlock : '')+
     '</div>';
   }
