@@ -149,6 +149,10 @@ struct NpEntityState {
 
 NpEntityState npMedia = {};
 NpEntityState npVolume = {};
+/* One scratch copy for every reader - they all run on the loop, one at a
+   time - kept static because two lists of names are too big for the loop
+   task's stack, and shared because internal RAM is scarce. */
+NpEntityState npScratch = {};
 
 /* Home Assistant's media_player feature bits that matter here. */
 static const uint32_t NP_FEATURE_SEEK = 2;
@@ -403,8 +407,7 @@ bool npReadHa(NpEntityState &s, const char *entityId) {
   if (deserializeJson(doc, response, DeserializationOption::Filter(filter))) return false;
 
   JsonObjectConst attrs = doc["attributes"].as<JsonObjectConst>();
-  // Static: two lists of names make this too big for the loop task's stack.
-  static NpEntityState next;
+  NpEntityState &next = npScratch;
   memset(&next, 0, sizeof(next));
   next.valid = true;
   strlcpy(next.entity, entityId, sizeof(next.entity));
@@ -766,7 +769,7 @@ bool npReadHomebridge(NpEntityState &s, const NpSourceSettings &half) {
   JsonObjectConst values = doc["values"].as<JsonObjectConst>();
   int aid = doc["aid"] | -1;
 
-  static NpEntityState next;
+  NpEntityState &next = npScratch;
   next = s;   // keeps the input names between reads
   next.valid = true;
   next.title[0] = next.subtitle[0] = next.app[0] = '\0';
@@ -802,7 +805,7 @@ bool npReadHomebridge(NpEntityState &s, const NpSourceSettings &half) {
 
 /* Chromecast: what the dock reports for the Media widget, as this half. */
 static void npFromChromecast(NpEntityState &s, const NpSourceSettings &half) {
-  static NpEntityState next;
+  NpEntityState &next = npScratch;
   memset(&next, 0, sizeof(next));
   next.valid = true;
   strlcpy(next.friendly, half.name[0] ? half.name : "Chromecast", sizeof(next.friendly));
@@ -846,7 +849,7 @@ static DeviceCommand *npFindCommand(Device *device, const char *id) {
 char npGuessedInput[2][NP_LIST_TEXT] = {"", ""};
 
 static void npFromNothing(NpEntityState &s, const NpSourceSettings &half, uint8_t slot) {
-  static NpEntityState next;
+  NpEntityState &next = npScratch;
   memset(&next, 0, sizeof(next));
   Device *device = npFindDevice(half.keysDevice);
   next.valid = true;
@@ -2194,7 +2197,12 @@ static bool npHalfSameSource(const NpSourceSettings &a, const NpSourceSettings &
 /* Reads widgets.nowPlaying from the config. */
 void loadNowPlayingSettings(JsonObjectConst widgets) {
   JsonObjectConst settings = widgets["nowPlaying"].as<JsonObjectConst>();
-  static NowPlayingSettings next;
+  // Built in PSRAM: a whole second copy of the settings has no business in
+  // internal RAM for the moment it takes to compare them.
+  NowPlayingSettings *built = (NowPlayingSettings *)(psramFound()
+    ? ps_malloc(sizeof(NowPlayingSettings)) : malloc(sizeof(NowPlayingSettings)));
+  if (!built) return;
+  NowPlayingSettings &next = *built;
   npDefaultSettings(next);
   if (!settings.isNull()) {
     // Builds before source types wrote two bare entity ids.
@@ -2218,6 +2226,7 @@ void loadNowPlayingSettings(JsonObjectConst widgets) {
   bool mqttChanged = next.media.type == NP_SRC_MQTT || next.volume.type == NP_SRC_MQTT ||
                      npSettings.media.type == NP_SRC_MQTT || npSettings.volume.type == NP_SRC_MQTT;
   npSettings = next;
+  free(built);
   npPollNextMs = 0;
   if (mqttChanged) nowPlayingMqttTopicsChanged();
   Serial.printf("Widgets: now playing media=%s %s, volume=%s %s (keys %s/%s, %s)\n",
