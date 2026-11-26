@@ -26054,7 +26054,7 @@ bool sdBusyWithBackupJob() {
 // competing access did to a backup.
 bool debugLogCardWritable() {
   return sdReady && !sdBusyWithBackupJob() && !usbSdTransferActive() &&
-         !chunkUploadSessionActive;
+         !chunkUploadSessionActive && !webConfigTransferActive;
 }
 
 /*

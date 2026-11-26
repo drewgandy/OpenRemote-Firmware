@@ -22417,7 +22417,11 @@
     buttons.forEach(function(button){ button.disabled=true; });
     status.textContent="Asking the remote for its logs...";
     var started=new Date();
-    remoteFetch("/api/logs").then(function(data){
+    var tooOld="This firmware cannot export logs. Install the .bin from the same build as this page";
+    remoteFetch("/api/logs").catch(function(error){
+      throw /^(not found|HTTP 404)/i.test(error.message) ? new Error(tooOld) : error;
+    }).then(function(data){
+      if(!Array.isArray(data.files)) throw new Error(tooOld);
       var files=logZipSelect(data,recentOnly,Math.floor(started.getTime()/1000));
       if(!files.length) throw new Error("There are no logs on the card yet");
       var total=files.reduce(function(sum,file){ return sum+(Number(file.size)||0); },0);

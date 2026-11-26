@@ -35,6 +35,16 @@ jobs:
         # newer SCons mid-run, which can fail once; a second pass then succeeds.
         run: pio run -e openremote_rev5 || pio run -e openremote_rev5
 
+      # Shows on the run's summary page whether crash summaries will work.
+      - name: Check crash dump support
+        working-directory: remote
+        run: |
+          if grep -aq "Crash backtrace:" .pio/build/openremote_rev5/firmware.elf; then
+            echo "::notice title=Core dumps::enabled in this build"
+          else
+            echo "::warning title=Core dumps::NOT enabled in this build"
+          fi
+
       - name: Collect firmware
         run: |
           mkdir -p out
