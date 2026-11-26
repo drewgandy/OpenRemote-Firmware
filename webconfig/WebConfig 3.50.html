@@ -3356,6 +3356,29 @@
 .wgTile.wgContentPanel>*{position:relative;z-index:1}
 .widgetBackgroundChoice{width:min(250px,48%)}
 
+/* Now Playing */
+.wgNowPlaying{display:flex;flex-direction:column;gap:calc(4px * var(--wgScale));padding:calc(7px * var(--wgScale)) calc(8px * var(--wgScale))!important}
+.wgNpMedia{display:flex;gap:calc(9px * var(--wgScale));min-width:0;flex:1 1 auto}
+.wgNpArt{width:calc(54px * var(--wgScale));height:calc(54px * var(--wgScale));border-radius:calc(6px * var(--wgScale));
+  background:linear-gradient(150deg,#5b3cc4,#3a2f55);flex:0 0 auto}
+.wgNpNoVolume .wgNpArt{width:calc(70px * var(--wgScale));height:calc(70px * var(--wgScale))}
+.wgNpArtSmall{width:calc(30px * var(--wgScale));height:calc(30px * var(--wgScale))}
+.wgNpText{display:grid;gap:calc(2px * var(--wgScale));min-width:0;flex:1 1 auto;align-content:start}
+.wgNpTitle{font-size:calc(14px * var(--wgScale));font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wgNowPlaying .wgSource{font-size:calc(10px * var(--wgScale))}
+.wgNowPlaying .wgBar{margin-top:calc(2px * var(--wgScale));height:calc(3px * var(--wgScale))}
+.wgNowPlaying .wgBar i{background:#5aa9ff}
+.wgNowPlaying .wgTimes{margin-top:0}
+.wgNpVolume{display:flex;align-items:center;gap:calc(6px * var(--wgScale));border-top:1px solid rgba(255,255,255,.18);
+  padding-top:calc(4px * var(--wgScale));font-size:calc(10px * var(--wgScale));color:rgba(255,255,255,.56);min-width:0}
+.wgNpIcon{color:#7fd6a8;font-size:calc(11px * var(--wgScale))}
+.wgNpVolText{flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wgNpVolume b,.wgNpLevel{color:#fff;font-size:calc(14px * var(--wgScale));font-variant-numeric:tabular-nums}
+.wgNpSlim{flex-direction:row;align-items:center;gap:calc(8px * var(--wgScale))}
+.wgNpVolumeOnly,.wgNpEmpty{align-items:center;justify-content:center;text-align:center}
+.wgNpBig{font-size:calc(24px * var(--wgScale));font-weight:800;font-variant-numeric:tabular-nums}
+.wgNpGreen{font-size:calc(11px * var(--wgScale));color:#7fd6a8}
+
 /* Media */
 .wgMedia{grid-template-columns:auto minmax(0,1fr);gap:calc(11px * var(--wgScale));align-items:center}
 .wgMedia.wgMediaTextOnly{grid-template-columns:minmax(0,1fr)}
@@ -5295,6 +5318,7 @@
                 <option value="weather">Weather &mdash; current conditions</option>
                 <option value="battery">Battery &mdash; the remote's charge</option>
                 <option value="power">Power &mdash; estimated power use over time</option>
+                <option value="nowPlaying">Now Playing &mdash; media and volume from Home Assistant</option>
               </select>
             </label>
             <label>
@@ -6074,6 +6098,60 @@
 
       <details class="card widgetLibraryCard">
         <summary class="widgetCardHead">
+          <div class="widgetPreview" data-widget-preview="nowPlaying"></div>
+          <div>
+            <div class="sectionTitle">Widget</div>
+            <h2>Now Playing</h2>
+            <p>What is playing and how loud, from Home Assistant. Pick one player for the artwork, title and progress (an Apple TV, a Roku) and one for volume, input and sound mode (an AV receiver, a TV on ARC) &mdash; either can be left empty. Each half names its source. Tap it for transport keys, volume keys and a Receiver panel with the input and sound-mode pickers. Needs remote firmware with Now Playing support.</p>
+            <div class="widgetUsage" id="widgetUsageNowPlaying">Not on any page yet</div>
+          </div>
+        </summary>
+        <div class="widgetCardBody">
+          <datalist id="widgetNowPlayingEntities"></datalist>
+          <label>
+            <span class="fieldLabel">Now playing from</span>
+            <input class="textInput" id="widgetNowPlayingMedia" list="widgetNowPlayingEntities" maxlength="63" placeholder="media_player.den_apple_tv" autocomplete="off">
+            <div class="settingHint">The Home Assistant media_player whose app, title, artwork and position are shown. Leave empty for a volume-only widget.</div>
+          </label>
+          <label>
+            <span class="fieldLabel">Volume from</span>
+            <input class="textInput" id="widgetNowPlayingVolume" list="widgetNowPlayingEntities" maxlength="63" placeholder="media_player.den_denon" autocomplete="off">
+            <div class="settingHint">The media_player whose volume, mute, input and sound mode are shown and controlled &mdash; usually the AV receiver. Leave empty for media only.</div>
+          </label>
+          <div class="settingRow">
+            <div><div class="settingName">Allow input change</div><div class="settingHint">Turn this off to show the current input without letting anyone change it.</div></div>
+            <label class="switch"><input type="checkbox" id="widgetNowPlayingAllowInput" checked><span></span></label>
+          </div>
+          <div class="settingRow">
+            <div><div class="settingName">Allow sound-mode change</div><div class="settingHint">Turn this off to show the sound mode without letting anyone change it. With both off there is no Receiver panel.</div></div>
+            <label class="switch"><input type="checkbox" id="widgetNowPlayingAllowSoundMode" checked><span></span></label>
+          </div>
+          <label>
+            <span class="fieldLabel">Volume display</span>
+            <select class="textInput" id="widgetNowPlayingUnit">
+              <option value="db">dB</option>
+              <option value="percent">Percent</option>
+            </select>
+            <div class="settingHint">Percent is Home Assistant's volume level &times; 100, which matches a Denon's &ldquo;absolute&rdquo; display.</div>
+          </label>
+          <label id="widgetNowPlayingOffsetWrap">
+            <span class="fieldLabel">dB at zero volume</span>
+            <input class="textInput" id="widgetNowPlayingOffset" type="number" min="-120" max="20" step="0.5" value="-80">
+            <div class="settingHint">dB = volume level &times; 100 + this value. &minus;80 is right for Denon and Marantz receivers; adjust it until the remote matches the receiver's front panel.</div>
+          </label>
+          <div class="settingRow">
+            <div><div class="settingName">Volume pop-up</div><div class="settingHint">Shows the level for two seconds on any page when a volume or mute key for this receiver is pressed &mdash; for receivers that cannot draw an on-screen display over a 4K picture.</div></div>
+            <label class="switch"><input type="checkbox" id="widgetNowPlayingPopup" checked><span></span></label>
+          </div>
+          <div class="settingRow">
+            <div><div class="settingName">Download artwork</div><div class="settingHint">The player's picture, fetched through Home Assistant and cached on the remote's SD card. A Roku reports its app's icon; an Apple TV reports the poster.</div></div>
+            <label class="switch"><input type="checkbox" id="widgetNowPlayingArtwork" checked><span></span></label>
+          </div>
+        </div>
+      </details>
+
+      <details class="card widgetLibraryCard">
+        <summary class="widgetCardHead">
           <div class="widgetPreview" data-widget-preview="media"></div>
           <div>
             <div class="sectionTitle">Widget</div>
@@ -6425,7 +6503,7 @@
      different players, which is decided by the page each one sits on, not
      by settings duplicated into every copy.
    * ------------------------------------------------------------------ */
-  var WIDGET_KINDS=["weather","battery","media","power"];
+  var WIDGET_KINDS=["weather","battery","media","power","nowPlaying"];
   var POWER_RANGES=["1m","5m","10m","60m","6h","12h","1d","3d","7d"];
   var POWER_RANGE_LABELS={"1m":"1 min","5m":"5 min","10m":"10 min","60m":"1 hour","6h":"6 hours","12h":"12 hours",
                           "1d":"1 day","3d":"3 days","7d":"1 week"};
@@ -6446,7 +6524,10 @@
       weather:{background:"theme",location:"",latitude:null,longitude:null,units:"c",showRange:true,intervalHours:6},
       battery:{background:"theme",showPercent:true,showVoltage:false,warnBelow:20,statistic:"default",percentInIcon:false},
       media:{background:"theme",source:"auto",deviceId:"",castName:"",viaDock:true,autoExpand:true,artwork:true},
-      power:{background:"theme",range:"60m",colours:defaultPowerColours()}
+      power:{background:"theme",range:"60m",colours:defaultPowerColours()},
+      /* Must match npSettings in the remote's now_playing_widget.h. */
+      nowPlaying:{background:"theme",mediaEntity:"",volumeEntity:"",allowInput:true,allowSoundMode:true,
+                  volumeUnit:"db",dbOffset:-80,volumePopup:true,artwork:true}
     };
   }
 
@@ -6553,6 +6634,16 @@
     out.media.viaDock=true;
     out.media.autoExpand=media.autoExpand!==false;
     out.media.artwork=media.artwork!==false;
+    var np=raw.nowPlaying && typeof raw.nowPlaying==="object" ? raw.nowPlaying : {};
+    out.nowPlaying.mediaEntity=typeof np.mediaEntity==="string" ? np.mediaEntity.trim().slice(0,63) : "";
+    out.nowPlaying.volumeEntity=typeof np.volumeEntity==="string" ? np.volumeEntity.trim().slice(0,63) : "";
+    out.nowPlaying.allowInput=np.allowInput!==false;
+    out.nowPlaying.allowSoundMode=np.allowSoundMode!==false;
+    out.nowPlaying.volumeUnit=np.volumeUnit==="percent" ? "percent" : "db";
+    var offset=Number(np.dbOffset);
+    out.nowPlaying.dbOffset=isFinite(offset) && np.dbOffset!==null && np.dbOffset!=="" ? Math.max(-120,Math.min(20,offset)) : -80;
+    out.nowPlaying.volumePopup=np.volumePopup!==false;
+    out.nowPlaying.artwork=np.artwork!==false;
     return out;
   }
 
@@ -6569,6 +6660,7 @@
     if(kind==="weather") return "Weather";
     if(kind==="battery") return "Battery";
     if(kind==="power") return "Power";
+    if(kind==="nowPlaying") return "Now Playing";
     return "Media";
   }
 
@@ -6855,6 +6947,8 @@
       '</div>';
     }
 
+    if(kind==="nowPlaying") return nowPlayingTileMarkup(tileClass,style,data);
+
     var showMediaArt=widgetSettings.media.artwork && !!data.artwork;
     var artStyle=showMediaArt ? ' style="background-image:url('+data.artwork+')"' : "";
     return '<div class="wgTile wgMedia'+(showMediaArt ? "" : " wgMediaTextOnly")+tileClass+'"'+style+'>'+
@@ -6865,6 +6959,50 @@
         '<div class="wgBar"><i style="width:41%"></i></div>'+
         '<div class="wgTimes"><span>20:32</span><span>-29:18</span></div>'+
       '</div>'+
+    '</div>';
+  }
+
+  /* A sample face: the remote fills in the real player's names and values. */
+  function nowPlayingVolumeSample(){
+    var np=widgetSettings.nowPlaying;
+    return np.volumeUnit==="percent" ? "48%" : Math.round(0.48*100+Number(np.dbOffset))+" dB";
+  }
+  function nowPlayingShortName(entity,fallback){
+    if(!entity) return fallback;
+    var device=(Array.isArray(addedDevices)?addedDevices:[]).find(function(d){return d && d.haEntityId===entity;});
+    if(device && device.name) return device.name;
+    return entity.replace(/^media_player\./,"").replace(/_/g," ");
+  }
+  function nowPlayingTileMarkup(tileClass,style,data){
+    var np=widgetSettings.nowPlaying;
+    var hasMedia=!!np.mediaEntity, hasVolume=!!np.volumeEntity;
+    var mediaName=escapeWidgetText(nowPlayingShortName(np.mediaEntity,"Media player"));
+    var volumeName=escapeWidgetText(nowPlayingShortName(np.volumeEntity,"Receiver"));
+    var slim=!!(data && data.slim);
+    if(!hasMedia && !hasVolume){
+      return '<div class="wgTile wgNowPlaying wgNpEmpty'+tileClass+'"'+style+'><div class="wgTitle">Now Playing</div>'+
+        '<div class="wgSource">Choose the players below</div></div>';
+    }
+    var volume='<div class="wgNpVolume"><span class="wgNpIcon">&#128266;</span><span class="wgNpVolText">'+volumeName+
+      ' &middot; Input &middot; Sound mode</span><b>'+escapeWidgetText(nowPlayingVolumeSample())+'</b></div>';
+    if(slim){
+      return '<div class="wgTile wgNowPlaying wgNpSlim'+tileClass+'"'+style+'>'+
+        (hasMedia ? '<div class="wgNpArt wgNpArtSmall"></div><div class="wgNpText"><div class="wgNpTitle">Title</div><div class="wgSource">App</div></div>'
+                  : '<div class="wgNpText"><div class="wgSource">'+volumeName+' &middot; Input</div></div>')+
+        (hasVolume ? '<b class="wgNpLevel">'+escapeWidgetText(nowPlayingVolumeSample())+'</b>' : '')+
+      '</div>';
+    }
+    if(!hasMedia){
+      return '<div class="wgTile wgNowPlaying wgNpVolumeOnly'+tileClass+'"'+style+'>'+
+        '<div class="wgSource">'+volumeName+'</div><div class="wgNpBig">'+escapeWidgetText(nowPlayingVolumeSample())+'</div>'+
+        '<div class="wgNpGreen">Input &middot; Sound mode</div></div>';
+    }
+    return '<div class="wgTile wgNowPlaying'+(hasVolume ? '' : ' wgNpNoVolume')+tileClass+'"'+style+'>'+
+      '<div class="wgNpMedia"><div class="wgNpArt"></div><div class="wgNpText">'+
+        '<div class="wgSource">App &middot; '+mediaName+'</div><div class="wgNpTitle">Title</div>'+
+        '<div class="wgSource">S1 E1 - Episode</div><div class="wgBar"><i style="width:38%"></i></div>'+
+        '<div class="wgTimes"><span>18:22</span><span>-30:41</span></div></div></div>'+
+      (hasVolume ? volume : '')+
     '</div>';
   }
 
@@ -6991,6 +7129,7 @@
     var slim=!!(item && item.size==="slim");
     if(item && item.widget==="custom") return customWidgetTileMarkup(customWidgetById(item.customId),scale,slim);
     var kind=widgetKindOf(item);
+    if(kind==="nowPlaying") return widgetTileMarkup(kind,scale,{slim:slim});
     if(!slim) return widgetTileMarkup(kind,scale,{});
     return customWidgetTileMarkup({elements:[kind],background:widgetSettings[kind] ? widgetSettings[kind].background : "theme"},scale,true);
   }
@@ -7011,7 +7150,7 @@
   }
 
   function countWidgetUsage(){
-    var counts={weather:0,battery:0,media:0,power:0};
+    var counts={weather:0,battery:0,media:0,power:0,nowPlaying:0};
     everyItemCollection().forEach(function(items){
       items.forEach(function(item){
         if(isWidgetItem(item) && item.widget!=="custom") counts[widgetKindOf(item)]++;
@@ -7022,7 +7161,7 @@
 
   function totalWidgetCount(){
     var counts=countWidgetUsage();
-    return counts.weather+counts.battery+counts.media+counts.power;
+    return counts.weather+counts.battery+counts.media+counts.power+counts.nowPlaying;
   }
 
   function setWidgetStatus(id,message,kind){
@@ -7140,6 +7279,40 @@
     if(castNameInput) castNameInput.value=widgetSettings.media.castName || "";
     var mediaBackground=document.getElementById("widgetMediaBackground");
     if(mediaBackground) mediaBackground.value=widgetSettings.media.background;
+
+    var np=widgetSettings.nowPlaying;
+    var npList=document.getElementById("widgetNowPlayingEntities");
+    if(npList){
+      npList.innerHTML="";
+      var seenEntities={};
+      (Array.isArray(addedDevices)?addedDevices:[]).forEach(function(device){
+        var entity=device && typeof device.haEntityId==="string" ? device.haEntityId : "";
+        if(entity.indexOf("media_player.")!==0 || seenEntities[entity]) return;
+        seenEntities[entity]=true;
+        var option=document.createElement("option");
+        option.value=entity;
+        option.textContent=device.name || entity;
+        npList.appendChild(option);
+      });
+    }
+    var npMedia=document.getElementById("widgetNowPlayingMedia");
+    if(npMedia && document.activeElement!==npMedia) npMedia.value=np.mediaEntity;
+    var npVolume=document.getElementById("widgetNowPlayingVolume");
+    if(npVolume && document.activeElement!==npVolume) npVolume.value=np.volumeEntity;
+    var npInput=document.getElementById("widgetNowPlayingAllowInput");
+    if(npInput) npInput.checked=np.allowInput;
+    var npSound=document.getElementById("widgetNowPlayingAllowSoundMode");
+    if(npSound) npSound.checked=np.allowSoundMode;
+    var npUnit=document.getElementById("widgetNowPlayingUnit");
+    if(npUnit) npUnit.value=np.volumeUnit;
+    var npOffset=document.getElementById("widgetNowPlayingOffset");
+    if(npOffset && document.activeElement!==npOffset) npOffset.value=String(np.dbOffset);
+    var npOffsetWrap=document.getElementById("widgetNowPlayingOffsetWrap");
+    if(npOffsetWrap) npOffsetWrap.style.display=np.volumeUnit==="percent" ? "none" : "";
+    var npPopup=document.getElementById("widgetNowPlayingPopup");
+    if(npPopup) npPopup.checked=np.volumePopup;
+    var npArtwork=document.getElementById("widgetNowPlayingArtwork");
+    if(npArtwork) npArtwork.checked=np.artwork;
     renderCustomWidgetLibrary();
   }
 
@@ -7364,6 +7537,25 @@
     },false);
     bindSwitch("widgetMediaAutoExpand",function(v){ widgetSettings.media.autoExpand=v; });
     bindSwitch("widgetMediaArtwork",function(v){ widgetSettings.media.artwork=v; });
+    function bindNowPlayingEntity(id,key){
+      var el=document.getElementById(id);
+      if(el) el.addEventListener("change",function(){
+        widgetSettings.nowPlaying[key]=String(el.value || "").trim().slice(0,63);
+        el.value=widgetSettings.nowPlaying[key];
+        widgetSettingsChanged();
+      },false);
+    }
+    bindNowPlayingEntity("widgetNowPlayingMedia","mediaEntity");
+    bindNowPlayingEntity("widgetNowPlayingVolume","volumeEntity");
+    bindSwitch("widgetNowPlayingAllowInput",function(v){ widgetSettings.nowPlaying.allowInput=v; });
+    bindSwitch("widgetNowPlayingAllowSoundMode",function(v){ widgetSettings.nowPlaying.allowSoundMode=v; });
+    bindSelect("widgetNowPlayingUnit",function(v){ widgetSettings.nowPlaying.volumeUnit=v==="percent" ? "percent" : "db"; });
+    bindSelect("widgetNowPlayingOffset",function(v){
+      var offset=Number(v);
+      widgetSettings.nowPlaying.dbOffset=isFinite(offset) && v!=="" ? Math.max(-120,Math.min(20,offset)) : -80;
+    });
+    bindSwitch("widgetNowPlayingPopup",function(v){ widgetSettings.nowPlaying.volumePopup=v; });
+    bindSwitch("widgetNowPlayingArtwork",function(v){ widgetSettings.nowPlaying.artwork=v; });
 
     var widgetsTab=document.getElementById("tab-widgets");
     if(widgetsTab) widgetsTab.addEventListener("change",function(){
@@ -15309,6 +15501,7 @@
       '<option value="weather">Weather &mdash; current conditions</option>'+
       '<option value="battery">Battery &mdash; the remote\'s charge</option>'+
       '<option value="power">Power &mdash; estimated power use over time</option>'+
+      '<option value="nowPlaying">Now Playing &mdash; media and volume from Home Assistant</option>'+
     '</optgroup>';
     if(customWidgets.length){
       var group=document.createElement("optgroup");

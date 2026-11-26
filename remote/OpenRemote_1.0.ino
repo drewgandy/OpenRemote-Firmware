@@ -9013,7 +9013,11 @@ enum WidgetKind : uint8_t {
   // an element of a custom widget.
   WIDGET_CLOCK = 4,
   // A widget the user built; which one travels beside it as a custom index.
-  WIDGET_CUSTOM = 5
+  WIDGET_CUSTOM = 5,
+  /* Now Playing: a pinned media player and a pinned volume source, both from
+     Home Assistant (now_playing_widget.h). Outside WIDGET_KIND_COUNT because it
+     has no wallpaper or custom-widget element yet; kinds are stored by name. */
+  WIDGET_NOWPLAYING = 6
 };
 
 static const int WIDGET_TILE_WIDTH = 224;
@@ -19079,6 +19083,30 @@ bool pollHomeAssistantEntity(const char *entityId) {
   return true;
 }
 
+/* now_playing_widget.h, which sits with the other widgets further down. */
+bool nowPlayingPollWanted();
+void pollNowPlaying(uint32_t now);
+void nowPlayingNoteCommand(const DeviceCommand &command, bool sent);
+
+/* Brings the station up for direct Home Assistant reads, or says it could not. */
+bool holdHomeAssistantRadio(uint32_t now) {
+  if (WiFi.status() == WL_CONNECTED) {
+    haDirectOwnsRadio = true;
+    return true;
+  }
+  if (!hasAnyWifiProfile()) return false;
+  wifiOn = true;
+  ensureSelectedWifiProfile();
+  haDirectOwnsRadio = true;
+  networkShutdownAtMs = 0;
+  if (!ensureStationConnected(12000UL)) {
+    releaseHomeAssistantRadio();
+    haPollNextMs = now + 30000UL;
+    return false;
+  }
+  return true;
+}
+
 /*
   Keeps Home Assistant tiles current.
 
@@ -19088,6 +19116,10 @@ bool pollHomeAssistantEntity(const char *entityId) {
   polls, but only while the screen is awake: a tile nobody is looking at is
   not worth the radio, and the remote cannot hold a socket open the way a
   mains powered dock can.
+
+  The Now Playing widget needs attributes the dock does not relay yet (title,
+  position, volume, inputs), so while it - or its volume pop-up - is on
+  screen it is read directly in either case.
 */
 void serviceHomeAssistantLive(uint32_t now) {
   if (!homeAssistantConfigured()) {
@@ -19095,15 +19127,13 @@ void serviceHomeAssistantLive(uint32_t now) {
     return;
   }
 
-  if (homeAssistantShouldUseDock()) {
-    if (!haWatchListPushed && dockConnected()) sendHomeAssistantWatchListToDock();
-    releaseHomeAssistantRadio();
-    return;
-  }
+  bool viaDock = homeAssistantShouldUseDock();
+  if (viaDock && !haWatchListPushed && dockConnected()) sendHomeAssistantWatchListToDock();
 
   const char *entities[MAX_LIVE_STATES];
-  uint8_t count = collectHomeAssistantEntities(entities, MAX_LIVE_STATES);
-  if (!count || displaySleeping) {
+  uint8_t count = viaDock ? 0 : collectHomeAssistantEntities(entities, MAX_LIVE_STATES);
+  bool richWanted = nowPlayingPollWanted();
+  if ((!count && !richWanted) || displaySleeping) {
     releaseHomeAssistantRadio();
     return;
   }
@@ -19113,28 +19143,22 @@ void serviceHomeAssistantLive(uint32_t now) {
   if (haRefreshNow) {
     const char *entityId = haRefreshNow;
     haRefreshNow = nullptr;
-    if (WiFi.status() == WL_CONNECTED) {
+    if (count && WiFi.status() == WL_CONNECTED) {
       pollHomeAssistantEntity(entityId);
       return;
     }
   }
 
+  if (richWanted && (WiFi.status() == WL_CONNECTED || !haPollNextMs ||
+                     (int32_t)(now - haPollNextMs) >= 0)) {
+    if (!holdHomeAssistantRadio(now)) return;
+    pollNowPlaying(now);
+  }
+  if (!count) return;
+
   if (haPollNextMs && (int32_t)(now - haPollNextMs) < 0) return;
   haPollNextMs = now + 2500UL;
-
-  if (WiFi.status() != WL_CONNECTED) {
-    if (!hasAnyWifiProfile()) return;
-    wifiOn = true;
-    ensureSelectedWifiProfile();
-    haDirectOwnsRadio = true;
-    networkShutdownAtMs = 0;
-    if (!ensureStationConnected(12000UL)) {
-      releaseHomeAssistantRadio();
-      haPollNextMs = now + 30000UL;
-      return;
-    }
-  }
-  haDirectOwnsRadio = true;
+  if (!holdHomeAssistantRadio(now)) return;
   if (haPollCursor >= count) haPollCursor = 0;
   pollHomeAssistantEntity(entities[haPollCursor]);
   haPollCursor++;
@@ -19155,6 +19179,7 @@ bool transmitHomeAssistantCommand(const DeviceCommand &command) {
   bool sent = viaDock ? callHomeAssistantViaDock(command)
                       : callHomeAssistantDirect(command);
   if (sent && viaDock) flashEspNowCommandFeedback();
+  nowPlayingNoteCommand(command, sent);
   return sent;
 }
 
@@ -19777,6 +19802,7 @@ uint8_t widgetKindFromName(const char *name) {
   if (strcmp(name, "weather") == 0) return WIDGET_WEATHER;
   if (strcmp(name, "battery") == 0) return WIDGET_BATTERY;
   if (strcmp(name, "power") == 0) return WIDGET_POWER;
+  if (strcmp(name, "nowPlaying") == 0) return WIDGET_NOWPLAYING;
   return WIDGET_MEDIA;
 }
 
@@ -19808,6 +19834,7 @@ const char *widgetKindName(uint8_t kind) {
   if (kind == WIDGET_WEATHER) return "weather";
   if (kind == WIDGET_BATTERY) return "battery";
   if (kind == WIDGET_POWER) return "power";
+  if (kind == WIDGET_NOWPLAYING) return "nowPlaying";
   return "media";
 }
 
@@ -19927,7 +19954,10 @@ void applyCustomWidgetsJson(JsonArrayConst rows, JsonArrayConst wallpapers) {
   }
 }
 
+void loadNowPlayingSettings(JsonObjectConst widgets);
+
 void applyWidgetSettingsJson(JsonObjectConst widgets, JsonArrayConst wallpapers) {
+  loadNowPlayingSettings(widgets);
   if (widgets.isNull()) return;
 
   JsonObjectConst weather = widgets["weather"].as<JsonObjectConst>();
@@ -39590,6 +39620,8 @@ extern "C" {
   LV_FONT_DECLARE(lv_font_openremote_20);
 }
 
+struct NowPlayingUi;
+
 struct WidgetInstance {
   lv_obj_t *card;
   lv_obj_t *primary;    // percentage, temperature or title
@@ -39627,6 +39659,7 @@ struct WidgetInstance {
   uint8_t batteryStatistic;
   lv_obj_t *iconPercent;   // the level inside the battery cell, when enabled
   PowerWidgetUi *power;    // a power face's graph and labels
+  NowPlayingUi *nowPlayingUi;   // a Now Playing face's labels and keys
 };
 
 // A page of custom widgets holds up to three live elements per widget, plus a
@@ -40542,6 +40575,9 @@ void buildWidgetBatteryFace(WidgetInstance &instance, lv_obj_t *parent,
                   widgetMutedColour(), width - pad * 2, LV_TEXT_ALIGN_CENTER);
 }
 
+void mediaArtFileForUrl(const char *url, char *out, size_t outSize);
+#include "now_playing_widget.h"
+
 /* ------------------------------------------------------ custom widgets *
    A custom widget is up to three elements sharing one tile. One element on
    a large tile draws exactly the face its library widget draws. Otherwise
@@ -41332,6 +41368,16 @@ uint8_t buildAnimatedWidgetContents(lv_obj_t *card, uint8_t kind, uint8_t custom
 uint8_t buildWidgetContents(lv_obj_t *card, uint8_t kind, uint8_t custom, int width,
                             int height, bool expanded, bool slim,
                             WidgetInstance *instances, uint8_t capacity) {
+  if (kind == WIDGET_NOWPLAYING) {
+    if (!capacity) return 0;
+    initWidgetInstance(instances[0], card, kind, width, height, expanded);
+    instances[0].cell = slim && !expanded;
+    instances[0].nowPlayingUi = buildNowPlayingFace(card, width, height, expanded, slim);
+    instances[0].tile = card;
+    instances[0].ownerKind = kind;
+    instances[0].custom = custom;
+    return 1;
+  }
   uint8_t elements[CUSTOM_WIDGET_MAX_ELEMENTS];
   uint8_t count = widgetElementsFor(kind, custom, elements);
   if (count > capacity) count = capacity;
@@ -41404,6 +41450,11 @@ void buildWidgetFace(WidgetInstance &instance, lv_obj_t *parent, uint8_t kind,
 */
 void refreshWidgetInstance(WidgetInstance &instance) {
   if (!instance.card || !lv_obj_is_valid(instance.card)) return;
+
+  if (instance.kind == WIDGET_NOWPLAYING) {
+    refreshNowPlayingUi(instance.nowPlayingUi);
+    return;
+  }
 
   if (instance.kind == WIDGET_POWER) {
     // Short ranges move every second; hours of history every five.
@@ -41776,9 +41827,12 @@ void openWidgetFullScreen(lv_obj_t *sourceTile, uint8_t kind, uint8_t custom) {
     refreshWidgetInstance(widgetExpandedInstances[i]);
   }
 
-  makeWidgetLabel(widgetExpandedOverlay, "Tap to close", 0, finalHeight - 24,
-                  &lv_font_montserrat_10, widgetMutedColour(), finalWidth,
-                  LV_TEXT_ALIGN_CENTER);
+  // Now Playing fills the whole view with keys and marks its close with an X.
+  if (kind != WIDGET_NOWPLAYING) {
+    makeWidgetLabel(widgetExpandedOverlay, "Tap to close", 0, finalHeight - 24,
+                    &lv_font_montserrat_10, widgetMutedColour(), finalWidth,
+                    LV_TEXT_ALIGN_CENTER);
+  }
 
   lv_anim_t animation;
   lv_anim_init(&animation);
@@ -45276,6 +45330,7 @@ void loop() {
   serviceBluetoothLinkLog();
   serviceSettingsBatteryCard(now);
   if (!displaySleeping) LOOP_TIMED("serviceWidgets", serviceWidgets(now));
+  LOOP_TIMED("serviceNowPlaying", serviceNowPlaying(now));
   LOOP_TIMED("serviceMediaTarget", serviceMediaTarget(now));
   LOOP_TIMED("serviceMediaRadio", serviceMediaRadio(now));
   LOOP_TIMED("serviceWeatherWidget", serviceWeatherWidget(now));
