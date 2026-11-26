@@ -4990,6 +4990,18 @@
           <div class="updateProgressText" id="webConfigUpdateProgressText">0 KB</div>
           <div class="updateStatus" id="webConfigUpdateStatus">Ready</div>
         </div>
+        <div class="updatePane" style="grid-column:1/-1">
+          <div class="sectionTitle">Debug logs</div>
+          <h3>Download logs</h3>
+          <p>Saves the remote's debug logs and battery log to this computer as one <strong>.zip</strong>. Logging is switched on or off on the remote under Settings &gt; Debug. Keep the remote awake while it downloads.</p>
+          <div class="updateActions">
+            <button class="updateBtn" id="logsRecentBtn" type="button">Last 24 Hours</button>
+            <button class="updateBtn" id="logsAllBtn" type="button">All Logs</button>
+          </div>
+          <div class="updateProgress" aria-hidden="true"><span class="updateProgressFill" id="logsProgress"></span></div>
+          <div class="updateProgressText" id="logsProgressText">0 KB</div>
+          <div class="updateStatus" id="logsStatus">Ready</div>
+        </div>
       </div>
 
       <div class="card updateCard">
@@ -22308,6 +22320,171 @@
         webConfigInput.value="";
       });
     },false);
+  }
+
+  /* LOG ZIP START: also run by tools/debug_log_test/zip.test.cjs */
+  // Packs [{name,bytes,date}] into a zip. Entries are deflated where the browser
+  // can, and stored as they are where it cannot.
+  function logZipDeflate(bytes){
+    var stream;
+    try{ stream=new CompressionStream("deflate-raw"); }catch(err){ return Promise.resolve(null); }
+    return new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer()
+      .then(function(buffer){ return new Uint8Array(buffer); });
+  }
+
+  function logZipBuild(entries){
+    var encoder=new TextEncoder();
+    var parts=[],directory=[],offset=0,directorySize=0;
+    function header(size,fields){
+      var view=new DataView(new ArrayBuffer(size)),at=0;
+      fields.forEach(function(field){
+        if(field[0]===4) view.setUint32(at,field[1]>>>0,true);
+        else view.setUint16(at,field[1],true);
+        at+=field[0];
+      });
+      return new Uint8Array(view.buffer);
+    }
+    function add(index){
+      if(index>=entries.length){
+        var end=header(22,[[4,0x06054b50],[2,0],[2,0],[2,entries.length],[2,entries.length],
+                           [4,directorySize],[4,offset],[2,0]]);
+        return Promise.resolve(new Blob(parts.concat(directory,[end]),{type:"application/zip"}));
+      }
+      var entry=entries[index],bytes=entry.bytes;
+      var crc=0xFFFFFFFF;
+      for(var i=0;i<bytes.length;i++) crc=(crc>>>8)^CRC32_TABLE[(crc^bytes[i])&0xFF];
+      crc=(crc^0xFFFFFFFF)>>>0;
+      return logZipDeflate(bytes).then(function(packed){
+        var method=packed && packed.length<bytes.length ? 8 : 0;
+        var body=method ? packed : bytes;
+        var name=encoder.encode(entry.name);
+        var d=entry.date;
+        var time=(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1);
+        var date=((Math.max(1980,d.getFullYear())-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate();
+        var common=[[2,20],[2,0x0800],[2,method],[2,time],[2,date],[4,crc],
+                    [4,body.length],[4,bytes.length],[2,name.length],[2,0]];
+        var local=header(30,[[4,0x04034b50]].concat(common));
+        var central=header(46,[[4,0x02014b50],[2,20]].concat(common,
+                           [[2,0],[2,0],[2,0],[4,0],[4,offset]]));
+        parts.push(local,name,body);
+        directory.push(central,name);
+        offset+=local.length+name.length+body.length;
+        directorySize+=central.length+name.length;
+        return add(index+1);
+      });
+    }
+    return add(0);
+  }
+
+  // Which files of the remote's list to collect. "Recent" keeps anything written
+  // in the last 24 hours, this boot's files, and files with no usable time.
+  function logZipSelect(data,recentOnly,browserNow){
+    var now=Number(data.now)||browserNow;
+    var boot="-b"+("0000"+(Number(data.boot)||0)).slice(-5)+"-";
+    return (data.files||[]).filter(function(file){
+      if(!recentOnly || /battery[^\/]*\.csv$/.test(file.path)) return true;
+      var modified=Number(file.modified)||0;
+      return modified<1700000000 || modified>=now-86400 || file.path.indexOf(boot)>=0;
+    }).sort(function(a,b){ return a.path<b.path ? -1 : (a.path>b.path ? 1 : 0); });
+  }
+  /* LOG ZIP END */
+
+  function logsDownloadFile(path){
+    var options={cache:"no-store",headers:{}};
+    if(remoteToken) options.headers["X-OpenRemote-Token"]=remoteToken;
+    var timer=null;
+    if(typeof AbortController==="function"){
+      var controller=new AbortController();
+      options.signal=controller.signal;
+      timer=window.setTimeout(function(){ controller.abort(); },120000);
+    }
+    return fetch(remoteApiUrl("/api/sd/download?path="+encodeURIComponent(path)),options)
+      .then(function(response){
+        if(!response.ok) throw new Error("HTTP "+response.status);
+        return response.arrayBuffer();
+      }).then(function(buffer){
+        window.clearTimeout(timer);
+        return new Uint8Array(buffer);
+      },function(error){
+        window.clearTimeout(timer);
+        throw error;
+      });
+  }
+
+  function logsCollect(recentOnly){
+    var buttons=[document.getElementById("logsRecentBtn"),document.getElementById("logsAllBtn")];
+    var status=document.getElementById("logsStatus");
+    buttons.forEach(function(button){ button.disabled=true; });
+    status.textContent="Asking the remote for its logs...";
+    var started=new Date();
+    remoteFetch("/api/logs").then(function(data){
+      var files=logZipSelect(data,recentOnly,Math.floor(started.getTime()/1000));
+      if(!files.length) throw new Error("There are no logs on the card yet");
+      var total=files.reduce(function(sum,file){ return sum+(Number(file.size)||0); },0);
+      var done=0,entries=[],failed=[];
+      setUpdateProgress("logsProgress","logsProgressText",0,total||1);
+      function next(index){
+        if(index>=files.length) return Promise.resolve();
+        var file=files[index];
+        status.textContent="Downloading "+(index+1)+" of "+files.length+"...";
+        // One retry: a single dropped request should not cost the whole export.
+        return logsDownloadFile(file.path)
+          .catch(function(){ return logsDownloadFile(file.path); })
+          .then(function(bytes){
+            var modified=Number(file.modified)||0;
+            entries.push({name:file.path.replace(/^\/logs\//,""),bytes:bytes,
+                          date:modified>=1700000000 ? new Date(modified*1000) : started});
+          },function(error){ failed.push(file.path+": "+error.message); })
+          .then(function(){
+            done+=Number(file.size)||0;
+            setUpdateProgress("logsProgress","logsProgressText",done,total||1);
+            return next(index+1);
+          });
+      }
+      return next(0).then(function(){
+        if(!entries.length) throw new Error("None of the log files could be downloaded");
+        var info=["OpenRemote logs","Exported: "+started.toString(),
+                  "Selection: "+(recentOnly?"last 24 hours":"all"),
+                  "Firmware: "+data.firmware+" (built "+data.built+")",
+                  "Boot number: "+data.boot,"Last reset: "+data.lastReset,
+                  "Debug logging: "+(data.logging?"on":"off"),
+                  "Newest lines saved first: "+(data.upToDate?"yes":"no"),
+                  "Crash flag: "+(data.crash && data.crash.active
+                    ? data.crash.reason+", "+data.crash.count+" since cleared, "+
+                      (data.crash.time ? new Date(data.crash.time*1000).toString() : "time unknown")
+                    : "none"),
+                  "Files: "+entries.length+(failed.length?"\nFailed:\n"+failed.join("\n"):"")];
+        entries.push({name:"info.txt",bytes:new TextEncoder().encode(info.join("\n")+"\n"),
+                      date:started});
+        status.textContent="Packing the zip...";
+        return logZipBuild(entries).then(function(blob){
+          function two(n){ return (n<10?"0":"")+n; }
+          var name="openremote-logs-"+started.getFullYear()+"-"+two(started.getMonth()+1)+"-"+
+                   two(started.getDate())+"-"+two(started.getHours())+two(started.getMinutes())+".zip";
+          var url=URL.createObjectURL(blob);
+          var link=document.createElement("a");
+          link.href=url;
+          link.download=name;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          window.setTimeout(function(){ URL.revokeObjectURL(url); },60000);
+          status.textContent="Saved "+name+(failed.length
+            ? " - "+failed.length+" file(s) could not be downloaded, see info.txt" : "");
+        });
+      });
+    }).catch(function(error){
+      status.textContent="Log download failed: "+error.message;
+    }).then(function(){
+      buttons.forEach(function(button){ button.disabled=false; });
+    });
+  }
+
+  var logsRecent=document.getElementById("logsRecentBtn");
+  var logsAll=document.getElementById("logsAllBtn");
+  if(logsRecent && logsAll){
+    logsRecent.addEventListener("click",function(){ logsCollect(true); },false);
+    logsAll.addEventListener("click",function(){ logsCollect(false); },false);
   }
 
   /*

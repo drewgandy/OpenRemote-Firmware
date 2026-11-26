@@ -7846,6 +7846,13 @@ void stopIrReceiver() {
 #include <nvs_flash.h>
 #endif
 #include "atvv_test_audio.h"
+#include "debug_log.h"
+// From here on, everything printed to Serial is also kept in the debug log.
+// The USB Studio protocol is given the UART itself, so transfers stay out.
+static HardwareSerial &usbSerialRaw = Serial;
+DebugSerialPort debugSerial(usbSerialRaw);
+#undef Serial
+#define Serial debugSerial
 
 class PsramJsonAllocator : public ArduinoJson::Allocator {
  public:
@@ -10301,6 +10308,8 @@ bool blePairingMode = false;
 // an explicit opt-in rather than the default because that trade-off was
 // judged unacceptable as a default in 2.94 - some users may still want it.
 bool bluetoothSleepEnabled = false;
+// Settings > Debug "Debug Logging" (debug_log.h). NVS only.
+bool debugLoggingEnabled = true;
 // Set when a BLE activity has been idle long enough (with Bluetooth Sleep
 // on) that holding its link open is no longer worth the standby cost.
 // Cleared by wakeDisplay(), so any button or motion brings the link
@@ -13311,6 +13320,7 @@ static const uint32_t BATTERY_LOG_SAMPLE_MS = 10UL * 60UL * 1000UL;
 
 void batteryLog(const char *event, const char *detail) {
   powerHistoryEvent(event);
+  Serial.printf("Event: %s %s\n", event, detail ? detail : "");
   if (!sdReady) return;
   float percent = readBatteryPercent();
   float voltage = readBatteryVoltage();
@@ -14002,6 +14012,8 @@ void loadSettings() {
   debugCpuRamEnabled = preferences.getBool("dbgCpu", false);
   debugAccelerometerEnabled = preferences.getBool("dbgAccel", false);
   debugFpsEnabled = preferences.getBool("dbgFps", false);
+  debugLoggingEnabled = preferences.getBool("dbgLog", true);
+  debugLogSetEnabled(debugLoggingEnabled);
   microphoneTestAudioEnabled = preferences.getBool("micTest", false);
   static const uint16_t defaultRows[5] = {246, 195, 144, 93, 42};
   for (uint8_t i = 0; i < 5; i++) {
@@ -14172,6 +14184,7 @@ void saveSettings() {
   preferences.putBool("dbgCpu", debugCpuRamEnabled);
   preferences.putBool("dbgAccel", debugAccelerometerEnabled);
   preferences.putBool("dbgFps", debugFpsEnabled);
+  preferences.putBool("dbgLog", debugLoggingEnabled);
   preferences.putBool("micTest", microphoneTestAudioEnabled);
   for (uint8_t i = 0; i < 5; i++) {
     char key[8];
@@ -25278,8 +25291,70 @@ void handleSdBrowseDownload() {
   String name = path.substring(path.lastIndexOf('/') + 1);
   webServer.sendHeader("Cache-Control", "no-store");
   webServer.sendHeader("Content-Disposition", String("attachment; filename=\"") + name + "\"");
+  // Counts as a transfer, so a long download is not cut off by sleep.
+  lastWakeMs = millis();
+  webConfigTransferActive = true;
   webServer.streamFile(file, "application/octet-stream");
+  webConfigTransferActive = false;
+  lastWakeMs = millis();
   file.close();
+}
+
+static void addLogManifestFile(JsonArray files, const String &path, File &file) {
+  JsonObject row = files.add<JsonObject>();
+  row["path"] = path;
+  row["size"] = (uint32_t)file.size();
+  row["modified"] = (uint32_t)file.getLastWrite();
+}
+
+// What WebConfig's "Download logs" collects. Saves the queued lines first, so
+// the newest ones are included; each file is then fetched by /api/sd/download.
+void handleLogsManifestApi() {
+  if (sdBusyWithBackupJob()) {
+    sendJson(409, "{\"ok\":false,\"busy\":true,\"error\":\"The remote is writing a backup\"}");
+    return;
+  }
+  if (!requestAuthorized()) { sendJson(403, "{\"ok\":false,\"error\":\"Not authorized\"}"); return; }
+  if (!sdReady) { sendJson(503, "{\"ok\":false,\"error\":\"SD card unavailable\"}"); return; }
+  lastWakeMs = millis();
+  bool flushed = debugLogFlush();
+  JsonDocument doc(&psramJsonAllocator);
+  doc["ok"] = true;
+  doc["firmware"] = OPENREMOTE_VERSION_TEXT;
+  doc["built"] = __DATE__ " " __TIME__;
+  doc["now"] = batteryClockEpoch();
+  doc["boot"] = debugLogBootNumber();
+  doc["logging"] = debugLogEnabled();
+  doc["upToDate"] = flushed;
+  doc["lastReset"] = resetReasonText(esp_reset_reason());
+  const DebugCrashFlag &crash = debugCrashFlag();
+  JsonObject flag = doc["crash"].to<JsonObject>();
+  flag["active"] = crash.active;
+  if (crash.active) {
+    flag["reason"] = resetReasonText((esp_reset_reason_t)crash.reason);
+    flag["count"] = crash.count;
+    flag["time"] = crash.epoch;
+  }
+  JsonArray files = doc["files"].to<JsonArray>();
+  File dir = SD.open(DEBUG_LOG_DIR);
+  uint16_t seen = 0;
+  while (dir) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+    if (!entry.isDirectory()) addLogManifestFile(files, entry.path(), entry);
+    entry.close();
+    if ((++seen % 32) == 0) serviceUiDuringLongHttpTransfer();
+  }
+  if (dir) dir.close();
+  for (const char *path : {BATTERY_LOG_PATH, BATTERY_LOG_OLD_PATH}) {
+    File entry = SD.open(path, FILE_READ);
+    if (!entry) continue;
+    addLogManifestFile(files, path, entry);
+    entry.close();
+  }
+  String body;
+  serializeJson(doc, body);
+  sendJson(200, body);
 }
 
 void handleSdBrowseMkdir() {
@@ -25975,6 +26050,13 @@ bool sdBusyWithBackupJob() {
   return backupRequestRunning || backupRequestPending || restoreRequestPending;
 }
 
+// For debug_log.h. Other writers go first: see the comment above on what
+// competing access did to a backup.
+bool debugLogCardWritable() {
+  return sdReady && !sdBusyWithBackupJob() && !usbSdTransferActive() &&
+         !chunkUploadSessionActive;
+}
+
 /*
   Charging overlay.
 
@@ -26342,7 +26424,7 @@ void serviceUsbWebConfigRequest() {
     size_t bytes = 0;
     uint16_t width = 0, height = 0;
     bool ok = saveLcdScreenshot(error, bytes, width, height);
-    usbImportReply(Serial, ok
+    usbImportReply(usbSerialRaw, ok
       ? String("{\"ok\":true,\"path\":\"") + LCD_SCREENSHOT_PATH + "\",\"width\":" +
         String(width) + ",\"height\":" + String(height) +
         ",\"format\":\"rgb565le\",\"bytes\":" + String((unsigned long)bytes) + "}"
@@ -27558,6 +27640,7 @@ bool performFactoryReset() {
   bool savedDbgCpu = preferences.getBool("dbgCpu", false);
   bool savedDbgAccel = preferences.getBool("dbgAccel", false);
   bool savedDbgFps = preferences.getBool("dbgFps", false);
+  bool savedDbgLog = preferences.getBool("dbgLog", true);
   bool savedPrefMig1 = preferences.getBool("prefMig1", false);
   preferences.clear();
   preferences.putUChar("dispDrv", savedDisplayDriverChoice);
@@ -27575,6 +27658,7 @@ bool performFactoryReset() {
   preferences.putBool("dbgCpu", savedDbgCpu);
   preferences.putBool("dbgAccel", savedDbgAccel);
   preferences.putBool("dbgFps", savedDbgFps);
+  preferences.putBool("dbgLog", savedDbgLog);
   preferences.putBool("prefMig1", savedPrefMig1);
   preferences.end();
   return ok;
@@ -29957,6 +30041,7 @@ void configureWebServer() {
   webServer.on("/api/factory-reset", HTTP_POST, handleFactoryReset);
   webServer.on("/api/sd/browse", HTTP_GET, handleSdBrowseList);
   webServer.on("/api/sd/download", HTTP_GET, handleSdBrowseDownload);
+  webServer.on("/api/logs", HTTP_GET, handleLogsManifestApi);
   webServer.on("/api/sd/size", HTTP_GET, handleSdBrowseSize);
   webServer.on("/api/sd/mkdir", HTTP_POST, handleSdBrowseMkdir);
   webServer.on("/api/sd/rename", HTTP_POST, handleSdBrowseRename);
@@ -34672,8 +34757,95 @@ void ensureStatusPill() {
 // "Show clock" (clockEnabled) can re-lay it out without rebuilding it -
 // renderTopBar() below calls this on every page render, which is what
 // applies the change the moment the setting's own page re-renders itself.
+/*
+  Crash flag (debug_log.h): a warning button beside the status pill from the
+  restart that followed a crash until it is cleared here. The title gives up
+  CRASH_BADGE_SPACE pixels while it shows.
+*/
+static const int CRASH_BADGE_SPACE = 30;
+lv_obj_t *crashBadge = nullptr;
+lv_obj_t *crashDetailBox = nullptr;
+void setTopBarTitle(const char *title, bool allowDevices);
+void repositionStatusPill();
+
+int crashBadgeSpace() { return debugCrashFlag().active ? CRASH_BADGE_SPACE : 0; }
+
+void confirmCrashDetail(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED || !crashDetailBox) return;
+  const char *choice = lv_msgbox_get_active_btn_text(crashDetailBox);
+  bool clear = choice && strcmp(choice, "Clear") == 0;
+  lv_msgbox_close(crashDetailBox);
+  crashDetailBox = nullptr;
+  if (physicalNavInputDevice && physicalNavGroup) {
+    lv_indev_set_group(physicalNavInputDevice, physicalNavGroup);
+  }
+  if (!clear) return;
+  Serial.println("Crash flag cleared");
+  debugCrashClear();
+  repositionStatusPill();
+  char title[sizeof(topBarCurrentTitle)];
+  strlcpy(title, topBarCurrentTitle, sizeof(title));
+  setTopBarTitle(title, topBarAllowDevices);
+}
+
+void showCrashDetail(lv_event_t *e) {
+  (void)e;
+  const DebugCrashFlag &crash = debugCrashFlag();
+  if (crashDetailBox || !crash.active) return;
+  char when[32] = "Time unknown";
+  if (crash.epoch) {
+    time_t epoch = (time_t)crash.epoch;
+    struct tm local;
+    localtime_r(&epoch, &local);
+    strftime(when, sizeof(when), clock24Hour ? "%b %e, %H:%M" : "%b %e, %I:%M %p", &local);
+  }
+  char text[200];
+  snprintf(text, sizeof(text), "Last: %s\n%s\n%u since last cleared\n%s",
+           resetReasonText((esp_reset_reason_t)crash.reason), when, (unsigned)crash.count,
+           debugLogEnabled() ? "Details are in the debug log."
+                             : "Debug logging is off.");
+  static const char *buttons[] = {"Clear", "Close", ""};
+  crashDetailBox = lv_msgbox_create(lv_scr_act(), "Remote crashed", text, buttons, false);
+  lv_obj_set_width(crashDetailBox, 220);
+  lv_obj_center(crashDetailBox);
+  lv_obj_add_event_cb(crashDetailBox, confirmCrashDetail, LV_EVENT_VALUE_CHANGED, nullptr);
+  if (physicalNavModalGroup) {
+    lv_group_remove_all_objs(physicalNavModalGroup);
+    lv_obj_t *buttonMatrix = findMsgboxButtonMatrix(crashDetailBox);
+    if (buttonMatrix) lv_group_add_obj(physicalNavModalGroup, buttonMatrix);
+    if (physicalNavInputDevice) {
+      lv_indev_set_group(physicalNavInputDevice, physicalNavModalGroup);
+    }
+  }
+}
+
+void updateCrashBadge(int pillX) {
+  if (!debugCrashFlag().active) {
+    if (crashBadge) lv_obj_add_flag(crashBadge, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  if (!crashBadge) {
+    crashBadge = lv_btn_create(topBar);
+    lv_obj_set_size(crashBadge, 26, 26);
+    lv_obj_set_style_radius(crashBadge, 13, 0);
+    lv_obj_set_style_bg_color(crashBadge, lvRgb(255, 176, 32), 0);
+    lv_obj_set_style_shadow_width(crashBadge, 0, 0);
+    lv_obj_set_style_pad_all(crashBadge, 0, 0);
+    lv_obj_set_ext_click_area(crashBadge, 6);
+    lv_obj_add_event_cb(crashBadge, showCrashDetail, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *icon = lv_label_create(crashBadge);
+    lv_label_set_text(icon, LV_SYMBOL_WARNING);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(icon, lv_color_black(), 0);
+    lv_obj_center(icon);
+  }
+  lv_obj_set_pos(crashBadge, pillX - CRASH_BADGE_SPACE, 7);
+  lv_obj_clear_flag(crashBadge, LV_OBJ_FLAG_HIDDEN);
+}
+
 void repositionStatusPill() {
   if (!statusPill) return;
+  updateCrashBadge(clockEnabled ? 138 : 196);
   lv_obj_set_pos(statusPill, clockEnabled ? 138 : 196, 5);
   lv_obj_set_size(statusPill, clockEnabled ? 96 : 38, 31);
   if (clockLabel) lv_obj_add_flag(clockLabel, LV_OBJ_FLAG_HIDDEN);
@@ -34690,7 +34862,7 @@ void repositionStatusPill() {
 */
 void setTopBarTitle(const char *title, bool allowDevices) {
   int titleX = 8;
-  int titleWidth = clockEnabled ? 126 : 182;
+  int titleWidth = (clockEnabled ? 126 : 182) - crashBadgeSpace();
   // A long title (e.g. "Backup / Restore") at 20pt doesn't fit titleWidth and
   // was getting cut down to almost nothing by LV_LABEL_LONG_DOT; drop to 16pt
   // for anything past ~10 characters so it still fits and truncates gracefully.
@@ -34709,6 +34881,7 @@ void setTopBarTitle(const char *title, bool allowDevices) {
   }
   lv_obj_set_pos(topBarTitleLabel, titleX, 9);
   lv_obj_set_width(topBarTitleLabel, titleWidth);
+  lv_obj_set_x(topBarDownHint, 119 - crashBadgeSpace());
   lv_obj_set_style_text_font(topBarTitleLabel,
     (allowDevices || longTitle) ? &lv_font_montserrat_16 : &lv_font_montserrat_20, 0);
   topBarAllowDevices = allowDevices;
@@ -34765,6 +34938,7 @@ void applyTopBarForBoundPage() {
 void switchEvent(lv_event_t *e) {
   bool *target = (bool *)lv_event_get_user_data(e);
   *target = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  if (target == &debugLoggingEnabled) debugLogSetEnabled(debugLoggingEnabled);
   if (target == &buttonTestActive) {
     endHeldIrCommand();
     buttonTestHeldIndex = -1;
@@ -37750,6 +37924,11 @@ void renderDebugPageOmote() {
   const int calibRowH = 44;
   // y=44, not 4 - clears the back button's (8,6)-(50,36) footprint.
   int y = 44;
+
+  lv_obj_t *logCard = makeOmoteCard(content, y, rowH);
+  makeOmoteRow(logCard, "Debug Logging", "Saved to SD for 7 days", 0, rowH,
+               &debugLoggingEnabled);
+  y += rowH + 12;
 
   lv_obj_t *togglesCard = makeOmoteCard(content, y, 3 * rowH + 2);
   makeOmoteRow(togglesCard, "Touch", "Live reticle, coordinates and trail", 0, rowH, &debugTouchEnabled);
@@ -44230,6 +44409,8 @@ bool enterDeepPowerSleep(bool allowQrPage) {
   saveDeepSleepRuntimeState();
   serviceBatteryHistory(millis(), true);
   batteryLog("deep-sleep", clockUseInternetTime ? "wake=motion/button/charger/3am" : "wake=motion/button/charger");
+  // Whatever is printed after this is carried over in RTC memory.
+  debugLogFlush();
   if (bleReady) stopBluetoothRadio("deep sleep");
   stopNetworkStack();
   stopIrReceiver();
@@ -44661,6 +44842,7 @@ void enterLowPowerWait() {
 void enterDisplaySleep() {
   if (displaySleeping) return;
   batteryLog("screen-off");
+  debugLogFlush();
   Serial.println("Display sleep: controller and backlights off");
   // The screen going dark means nobody is pressing anything, so there is no
   // reason to keep a radio powered waiting for a command that cannot come.
@@ -44992,6 +45174,7 @@ const char *resetReasonText(esp_reset_reason_t reason) {
     case ESP_RST_DEEPSLEEP: return "deep sleep wake";
     case ESP_RST_BROWNOUT: return "brownout";
     case ESP_RST_SDIO: return "SDIO";
+    case ESP_RST_CPU_LOCKUP: return "CPU lockup";
     default: return "unknown";
   }
 }
@@ -45025,6 +45208,9 @@ void setup() {
   // deep-sleep wake. 10ms is enough for the CDC/UART line to settle without
   // meaningfully reintroducing the delay it existed to avoid.
   delay(10);
+  // Before the first line is printed: it recovers what the last run could not
+  // save.
+  debugLogBegin();
 
   Serial.println();
   Serial.printf("OpenRemote %s - Rev 5 LVGL Runtime\n", OPENREMOTE_VERSION_TEXT);
@@ -45047,6 +45233,9 @@ void setup() {
   }
 
   loadSettings();
+  Serial.printf("Debug log: boot #%lu, built %s %s\n", (unsigned long)debugLogBootNumber(),
+                __DATE__, __TIME__);
+  debugLogReportCrash(Serial);
   loadBatteryHistory();
   if (configureApplicationPowerMode(false)) {
     Serial.println("Power manager: 240 MHz awake; auto light sleep + BLE modem sleep in BLE idle");
@@ -45153,6 +45342,7 @@ void setup() {
   // from it with a clock that was real when the remote went to sleep.
   wallClockTrusted = rtcWallClockTrusted && time(nullptr) >= 1700000000;
   applyClockMode();
+  debugLogSetClock(wallClockTrusted);
   powerSeriesSource = firmwarePowerSeries;
   powerRangeChosenHook = powerRangeChosenOnLcd;
   {
@@ -45314,7 +45504,8 @@ void loop() {
       )) {
     leaveBleConnectedIdle();
   }
-  LOOP_TIMED("serviceUsbSerialImport", serviceUsbSerialImport(Serial, usbCdcSession));
+  LOOP_TIMED("serviceUsbSerialImport",
+             serviceUsbSerialImport(usbSerialRaw, usbCdcSession));
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
   LOOP_TIMED("serviceUsbSerialImport", serviceUsbSerialImport(Serial0, uart0Session));
 #endif
@@ -45322,6 +45513,8 @@ void loop() {
   LOOP_TIMED("serviceKeypad", serviceKeypad(now));
   LOOP_TIMED("serviceHardwarePowerHold", serviceHardwarePowerHold(now));
   LOOP_TIMED("serviceDisplayRescueCombo", serviceDisplayRescueCombo(now));
+  LOOP_TIMED("debugLogService",
+             debugLogService(wallClockTrusted, !displaySleeping, Serial));
   LOOP_TIMED("serviceHeldIrRepeat", serviceHeldIrRepeat(now));
   LOOP_TIMED("serviceButtonTest", serviceButtonTest(now));
   LOOP_TIMED("serviceActivitySequence", serviceActivitySequence(now));
