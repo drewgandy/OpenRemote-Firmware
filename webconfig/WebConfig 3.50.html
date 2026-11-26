@@ -3392,6 +3392,25 @@
 .wgNpVolumeOnly,.wgNpEmpty{align-items:center;justify-content:center;text-align:center}
 .wgNpBig{font-size:calc(24px * var(--wgScale));font-weight:800;font-variant-numeric:tabular-nums}
 .wgNpGreen{font-size:calc(11px * var(--wgScale));color:#7fd6a8}
+.wgNowPlaying .wgNpTitle{font-size:calc(16px * var(--wgScale))}
+.wgNpVolName{font-size:calc(14px * var(--wgScale));font-weight:800;color:#fff}
+.wgNpRows3 .wgNpVolName{font-size:calc(16px * var(--wgScale))}
+.wgNowPlaying .wgNpLevel{font-size:calc(22px * var(--wgScale));font-weight:800}
+.wgNpRows3 .wgNpArt{width:calc(64px * var(--wgScale));height:calc(64px * var(--wgScale))}
+.wgNpProgress{display:flex;align-items:center;gap:calc(5px * var(--wgScale));font-size:calc(10px * var(--wgScale));color:rgba(255,255,255,.56)}
+.wgNpProgress .wgBar{flex:1 1 auto;margin:0}
+.wgNpFull{align-items:stretch}
+.wgNpArtBig{width:calc(80px * var(--wgScale));height:calc(80px * var(--wgScale));align-self:center}
+.wgNpRows4 .wgNpArtBig{width:calc(56px * var(--wgScale));height:calc(56px * var(--wgScale))}
+.wgNpCenter{text-align:center}
+.wgNpKeys{display:flex;gap:calc(5px * var(--wgScale))}
+.wgNpKeys i{flex:1 1 0;font-style:normal;text-align:center;background:rgba(36,48,63,.9);border-radius:calc(6px * var(--wgScale));
+  font-size:calc(10px * var(--wgScale));padding:calc(5px * var(--wgScale)) 0;color:#c9d4e0}
+.wgNpTransport{justify-content:center}.wgNpTransport i{flex:0 0 calc(46px * var(--wgScale))}
+.wgNpTransport .wgNpPlay{background:#5aa9ff;color:#10161f;border-radius:999px}
+.wgNpVolRow{display:flex;align-items:center;gap:calc(6px * var(--wgScale));border-top:1px solid rgba(255,255,255,.18);padding-top:calc(4px * var(--wgScale));
+  font-size:calc(11px * var(--wgScale));color:rgba(255,255,255,.56)}
+.wgNpVolRow b{color:#fff;font-size:calc(16px * var(--wgScale))}
 
 /* Media */
 .wgMedia{grid-template-columns:auto minmax(0,1fr);gap:calc(11px * var(--wgScale));align-items:center}
@@ -5340,6 +5359,9 @@
               <select class="textInput" id="canvasWidgetSize">
                 <option value="large">Large &mdash; three columns, two rows</option>
                 <option value="slim">Slim &mdash; three columns, one row</option>
+                <option value="3" data-tall>3 rows</option>
+                <option value="4" data-tall>4 rows &mdash; keys on the widget</option>
+                <option value="5" data-tall>5 rows &mdash; the whole screen, keys on the widget</option>
               </select>
             </label>
             <div class="settingRow" id="canvasWidgetAutoHideWrap" style="display:none"><div><div class="settingName">Auto hiding</div><div class="settingHint">Takes no rows while nothing is playing, so everything below moves up. When media starts, the widget grows into place and pushes the rows below back down. The designer always shows it at full size.</div></div><label class="switch"><input type="checkbox" id="canvasWidgetAutoHide"><span></span></label></div>
@@ -7246,31 +7268,41 @@
     var hasMedia=nowPlayingHalfActive(np.media), hasVolume=nowPlayingHalfActive(np.volume);
     var mediaName=escapeWidgetText(nowPlayingShortName(np.media,"Media player"));
     var volumeName=escapeWidgetText(nowPlayingShortName(np.volume,"Receiver"));
-    var slim=!!(data && data.slim);
+    var level=escapeWidgetText(nowPlayingVolumeSample());
+    var rows=data && data.rows ? data.rows : (data && data.slim ? 1 : 2);
+    var cls='wgTile wgNowPlaying wgNpRows'+rows+tileClass;
     if(!hasMedia && !hasVolume){
-      return '<div class="wgTile wgNowPlaying wgNpEmpty'+tileClass+'"'+style+'><div class="wgTitle">Now Playing</div>'+
+      return '<div class="'+cls+' wgNpEmpty"'+style+'><div class="wgTitle">Now Playing</div>'+
         '<div class="wgSource">Choose the players below</div></div>';
     }
-    var volume='<div class="wgNpVolume"><span class="wgNpIcon">&#128266;</span><span class="wgNpVolText">'+volumeName+
-      ' &middot; Input &middot; Sound mode</span><b>'+escapeWidgetText(nowPlayingVolumeSample())+'</b></div>';
-    if(slim){
-      return '<div class="wgTile wgNowPlaying wgNpSlim'+tileClass+'"'+style+'>'+
-        (hasMedia ? '<div class="wgNpArt wgNpArtSmall"></div><div class="wgNpText"><div class="wgNpTitle">Title</div><div class="wgSource">App</div></div>'
-                  : '<div class="wgNpText"><div class="wgSource">'+volumeName+' &middot; Input</div></div>')+
-        (hasVolume ? '<b class="wgNpLevel">'+escapeWidgetText(nowPlayingVolumeSample())+'</b>' : '')+
-      '</div>';
+    var volumeBlock='<div class="wgNpVolume"><span class="wgNpIcon">&#128266;</span>'+
+      '<div class="wgNpVolText"><div class="wgNpVolName">'+volumeName+'</div><div class="wgSource">Input &middot; Sound mode</div></div>'+
+      '<b class="wgNpLevel">'+level+'</b></div>';
+    if(rows===1){
+      return '<div class="'+cls+' wgNpSlim"'+style+'>'+
+        (hasMedia ? '<div class="wgNpArt wgNpArtSmall"></div><div class="wgNpText"><div class="wgNpTitle">Title</div><div class="wgSource">'+mediaName+'</div></div>'
+                  : '<span class="wgNpIcon">&#128266;</span><div class="wgNpText"><div class="wgNpTitle">'+volumeName+'</div><div class="wgSource">Input</div></div>')+
+        (hasVolume ? '<b class="wgNpLevel">'+level+'</b>' : '')+'</div>';
     }
     if(!hasMedia){
-      return '<div class="wgTile wgNowPlaying wgNpVolumeOnly'+tileClass+'"'+style+'>'+
-        '<div class="wgSource">'+volumeName+'</div><div class="wgNpBig">'+escapeWidgetText(nowPlayingVolumeSample())+'</div>'+
-        '<div class="wgNpGreen">Input &middot; Sound mode</div></div>';
+      return '<div class="'+cls+' wgNpVolumeOnly"'+style+'>'+volumeBlock+(rows>=4 ? '<div class="wgNpKeys"><i>&minus;</i><i>Mute</i><i>+</i></div>' : '')+'</div>';
     }
-    return '<div class="wgTile wgNowPlaying'+(hasVolume ? '' : ' wgNpNoVolume')+tileClass+'"'+style+'>'+
+    var progress='<div class="wgNpProgress"><span>18:22</span><div class="wgBar"><i style="width:38%"></i></div><span>-30:41</span></div>';
+    if(rows>=4){
+      return '<div class="'+cls+' wgNpFull"'+style+'>'+
+        '<div class="wgSource">'+mediaName+'</div>'+
+        '<div class="wgNpArt wgNpArtBig"></div>'+
+        '<div class="wgNpTitle wgNpCenter">Title</div><div class="wgSource wgNpCenter">App &middot; S1 E1</div>'+progress+
+        '<div class="wgNpKeys wgNpTransport"><i>&#9664;&#9664;</i><i class="wgNpPlay">&#9654;</i><i>&#9654;&#9654;</i></div>'+
+        (hasVolume ? '<div class="wgNpVolRow"><span class="wgNpIcon">&#128266;</span><span class="wgNpVolText">'+volumeName+' &middot; Input</span><b>'+level+'</b></div>'+
+          '<div class="wgNpKeys"><i>&minus;</i><i>Mute</i><i>+</i><i>Receiver</i></div>' : '')+
+      '</div>';
+    }
+    return '<div class="'+cls+(hasVolume ? '' : ' wgNpNoVolume')+'"'+style+'>'+
       '<div class="wgNpMedia"><div class="wgNpArt"></div><div class="wgNpText">'+
-        '<div class="wgSource">App &middot; '+mediaName+'</div><div class="wgNpTitle">Title</div>'+
-        '<div class="wgSource">S1 E1 - Episode</div><div class="wgBar"><i style="width:38%"></i></div>'+
-        '<div class="wgTimes"><span>18:22</span><span>-30:41</span></div></div></div>'+
-      (hasVolume ? volume : '')+
+        '<div class="wgNpTitle">Title</div><div class="wgSource">'+mediaName+' &middot; Playing</div>'+(rows===2 ? progress : '')+'</div></div>'+
+      (rows===3 ? progress : '')+
+      (hasVolume ? volumeBlock : '')+
     '</div>';
   }
 
@@ -7397,7 +7429,7 @@
     var slim=!!(item && item.size==="slim");
     if(item && item.widget==="custom") return customWidgetTileMarkup(customWidgetById(item.customId),scale,slim);
     var kind=widgetKindOf(item);
-    if(kind==="nowPlaying") return widgetTileMarkup(kind,scale,{slim:slim});
+    if(kind==="nowPlaying") return widgetTileMarkup(kind,scale,{slim:slim,rows:widgetItemRows(item)});
     if(!slim) return widgetTileMarkup(kind,scale,{});
     return customWidgetTileMarkup({elements:[kind],background:widgetSettings[kind] ? widgetSettings[kind].background : "theme"},scale,true);
   }
@@ -15017,9 +15049,18 @@
     return item && item.type==="spacer";
   }
 
+  /* Grid rows a widget covers: 1 slim, 2 large, and 3 to 5 for Now Playing,
+     the only widget with faces that tall. Matches parseWidgetItem() on the remote. */
+  function widgetItemRows(item){
+    if(!item) return 2;
+    if(item.size==="slim") return 1;
+    if(/^[345]$/.test(String(item.size)) && item.widget==="nowPlaying") return Number(item.size);
+    return 2;
+  }
+
   function gridSlotUnits(item){
     if(isGridSpacer(item)) return 1;
-    if(item && item.type==="widget") return item.size==="slim" ? 3 : 6;
+    if(item && item.type==="widget") return widgetItemRows(item)*3;
     return item && item.type==="activity" ? 3 : 1;
   }
 
@@ -15182,6 +15223,9 @@
 
           if(isWidgetItem(item)){
             if(item.size==="slim") el.classList.add("widgetSlim");
+            var itemRows=widgetItemRows(item);
+            el.setAttribute("data-widget-rows",String(itemRows));
+            if(itemRows>2) el.style.setProperty("grid-row","span "+itemRows,"important");
             if(item.autoHide) el.classList.add("widgetAutoHide");
             el.innerHTML=widgetItemMarkup(item,1);
           }else if(item.type==="activity"){
@@ -15276,8 +15320,9 @@
     function apply(){
       document.querySelectorAll(".lcdGridItem.widget").forEach(function(el){
         var height=el.clientHeight;
-        /* A slim widget is 44px on the remote rather than 96. */
-        var base=el.classList.contains("widgetSlim") ? 44 : 96;
+        /* The widget's height on the remote: rows of 44px on a 52px pitch. */
+        var rows=Number(el.getAttribute("data-widget-rows")) || (el.classList.contains("widgetSlim") ? 1 : 2);
+        var base=rows*52-8;
         if(height>0) el.style.setProperty("--wgScale",(height/base).toFixed(3));
       });
     }
@@ -15420,8 +15465,8 @@
     return item && item.type==="activity";
   }
 
-  /* Slots a dragged item covers - 1 for a button, 3 for an activity row, 6
-     for a large widget's two rows, 3 for a slim one. Drives both the drop highlight and where the
+  /* Slots a dragged item covers - 1 for a button, 3 for an activity row, 3
+     per widget row (6 for a large widget, up to 15 for a 5-row Now Playing). Drives both the drop highlight and where the
      drop is allowed to land. */
   function draggedItemSlotSpan(){
     var items=getCurrentPageItems();
@@ -15731,7 +15776,11 @@
           ? "custom:"+item.customId : widgetKindOf(item);
       }
       var widgetSizeSel=document.getElementById("canvasWidgetSize");
-      if(widgetSizeSel) widgetSizeSel.value=item && item.size==="slim" ? "slim" : "large";
+      if(widgetSizeSel){
+        updateCanvasWidgetSizeOptions();
+        var rows=item && isWidgetItem(item) ? widgetItemRows(item) : 2;
+        widgetSizeSel.value=rows===1 ? "slim" : rows===2 ? "large" : String(rows);
+      }
       var widgetAutoHideBox=document.getElementById("canvasWidgetAutoHide");
       if(widgetAutoHideBox) widgetAutoHideBox.checked=!!(item && item.autoHide===true);
       renderCanvasWidgetPreview();
@@ -15771,6 +15820,7 @@
     }else{
       item.widget=WIDGET_KINDS.indexOf(value)>=0 ? value : "media";
     }
+    if(/^[345]$/.test(String(size)) && item.widget==="nowPlaying") item.size=String(size);
     if(autoHide && widgetItemIsMediaOnly(item)) item.autoHide=true;
     return item;
   }
@@ -15780,15 +15830,31 @@
     return custom ? custom.name : widgetKindLabel(value);
   }
 
+  /* 3 to 5 rows are offered for Now Playing only. */
+  function updateCanvasWidgetSizeOptions(){
+    var select=document.getElementById("canvasWidgetSelect");
+    var sizeSel=document.getElementById("canvasWidgetSize");
+    if(!select || !sizeSel) return;
+    var tall=select.value==="nowPlaying";
+    sizeSel.querySelectorAll("option[data-tall]").forEach(function(option){
+      option.hidden=!tall;
+      option.disabled=!tall;
+    });
+    if(!tall && /^[345]$/.test(sizeSel.value)) sizeSel.value="large";
+  }
+
   function renderCanvasWidgetPreview(){
     var box=document.querySelector("[data-widget-preview-modal]");
     var select=document.getElementById("canvasWidgetSelect");
     if(!box || !select) return;
+    updateCanvasWidgetSizeOptions();
     var sizeSel=document.getElementById("canvasWidgetSize");
     var item=canvasWidgetItemFromControls(select.value,sizeSel ? sizeSel.value : "large");
     var autoHideWrap=document.getElementById("canvasWidgetAutoHideWrap");
     if(autoHideWrap) autoHideWrap.style.display=widgetItemIsMediaOnly(item) ? "" : "none";
     box.classList.toggle("slim",item.size==="slim");
+    var previewRows=widgetItemRows(item);
+    box.style.height=previewRows>2 ? (previewRows*52-8)+"px" : "";
     box.innerHTML=widgetItemMarkup(item,1);
   }
 

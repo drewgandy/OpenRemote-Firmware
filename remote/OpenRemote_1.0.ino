@@ -8930,7 +8930,7 @@ struct DeviceWidget {
   uint8_t kind;
   uint8_t slot;
   uint8_t custom;   // index into customWidgets when kind is WIDGET_CUSTOM
-  bool slim;        // one grid row instead of two
+  uint8_t rows;     // grid rows covered: 1 slim, 2 large, up to 5 for Now Playing
   bool autoHide;    // media-only: takes no rows while nothing is playing
 };
 
@@ -8974,7 +8974,7 @@ struct Tile {
   enum Kind : uint8_t { COMMAND, ACTIVITY, MACRO, WIDGET } kind;
   uint8_t widgetKind;
   uint8_t widgetCustom;
-  bool widgetSlim;
+  uint8_t widgetRows;     // 1 slim, 2 large, up to 5 for Now Playing
   bool widgetAutoHide;   // media-only widget that takes no rows while idle
   char label[28];
   char targetActivityId[48];
@@ -9288,9 +9288,9 @@ char activitiesThemePath[72] = "";
 */
 struct ActivitiesWidget {
   uint8_t kind;
-  uint8_t row;      // top row it occupies; a large widget covers the next too
+  uint8_t row;      // top row it occupies; the widget covers `rows` rows
   uint8_t custom;
-  bool slim;
+  uint8_t rows;
   bool autoHide;
 };
 static const uint8_t MAX_ACTIVITIES_WIDGETS = 6;
@@ -11464,7 +11464,7 @@ bool transmitIrCommand(const DeviceCommand &command);
 bool sendBleHidState(const DeviceCommand &command, bool pressed);
 void flashCommandFeedback();
 // Defined with the rest of the widget drawing, far below renderActivitiesPage.
-void makeWidgetTile(uint8_t slot, uint8_t kind, uint8_t custom, bool slim, int originY,
+void makeWidgetTile(uint8_t slot, uint8_t kind, uint8_t custom, uint8_t rows, int originY,
                     bool autoHide = false);
 void captureAutoHideLayout();
 bool isVoiceSearchCommand(const DeviceCommand *command);
@@ -19900,8 +19900,11 @@ uint8_t findCustomWidgetIndex(const char *id) {
   deleted from WebConfig on another computer, say - comes back as
   WIDGET_NO_CUSTOM and is left off the page rather than drawn empty.
 */
-void parseWidgetItem(JsonObjectConst item, uint8_t &kind, uint8_t &custom, bool &slim) {
-  slim = strcmp(item["size"] | "large", "slim") == 0;
+void parseWidgetItem(JsonObjectConst item, uint8_t &kind, uint8_t &custom, uint8_t &rows) {
+  // "slim" and "large" from every build; "3" to "5" for Now Playing.
+  const char *size = item["size"] | "large";
+  rows = strcmp(size, "slim") == 0 ? 1 : (size[0] >= '3' && size[0] <= '5' && !size[1])
+       ? (uint8_t)(size[0] - '0') : 2;
   custom = WIDGET_NO_CUSTOM;
   const char *name = item["widget"] | "media";
   if (strcmp(name, "custom") == 0) {
@@ -19910,6 +19913,8 @@ void parseWidgetItem(JsonObjectConst item, uint8_t &kind, uint8_t &custom, bool 
   } else {
     kind = widgetKindFromName(name);
   }
+  // Only Now Playing has faces taller than two rows so far.
+  if (kind != WIDGET_NOWPLAYING && rows > 2) rows = 2;
 }
 
 // Element numbers match the library kinds, so a library widget "shows" itself.
@@ -20503,10 +20508,10 @@ void loadRuntimeModel(JsonDocument &doc) {
          (strcmp(itemType, "widget") == 0 ? Tile::WIDGET : Tile::COMMAND));
       tile.widgetKind = WIDGET_MEDIA;
       tile.widgetCustom = WIDGET_NO_CUSTOM;
-      tile.widgetSlim = false;
+      tile.widgetRows = 2;
       tile.widgetAutoHide = false;
       if (tile.kind == Tile::WIDGET) {
-        parseWidgetItem(item, tile.widgetKind, tile.widgetCustom, tile.widgetSlim);
+        parseWidgetItem(item, tile.widgetKind, tile.widgetCustom, tile.widgetRows);
         tile.widgetAutoHide = item["autoHide"] | false;
       }
       tile.slot = constrain((int)(item["slot"] | slotCursor), 0, 254);
@@ -20514,7 +20519,7 @@ void loadRuntimeModel(JsonDocument &doc) {
         tile.slot = alignSlotToRow(tile.slot);
       }
       int nextSlot = (int)tile.slot +
-        (tile.kind == Tile::WIDGET ? (tile.widgetSlim ? 3 : 6)
+        (tile.kind == Tile::WIDGET ? tile.widgetRows * 3
                                    : (tile.kind == Tile::ACTIVITY ? 3 : 1));
       slotCursor = (uint8_t)constrain(max((int)slotCursor, nextSlot), 0, 254);
       const char *label = item["name"] | "";
@@ -20601,15 +20606,15 @@ void loadRuntimeModel(JsonDocument &doc) {
             constrain((int)(item["slot"] | activitiesSlotCursor), 0, 254));
           uint8_t widgetKind = WIDGET_MEDIA;
           uint8_t widgetCustom = WIDGET_NO_CUSTOM;
-          bool widgetSlim = false;
-          parseWidgetItem(item, widgetKind, widgetCustom, widgetSlim);
-          activitiesSlotCursor = (uint8_t)constrain((int)widgetSlot + (widgetSlim ? 3 : 6), 0, 254);
+          uint8_t widgetRows = 2;
+          parseWidgetItem(item, widgetKind, widgetCustom, widgetRows);
+          activitiesSlotCursor = (uint8_t)constrain((int)widgetSlot + widgetRows * 3, 0, 254);
           if (activitiesWidgetCount >= MAX_ACTIVITIES_WIDGETS) continue;
           if (widgetKind == WIDGET_CUSTOM && widgetCustom == WIDGET_NO_CUSTOM) continue;
           ActivitiesWidget &placement = activitiesWidgets[activitiesWidgetCount++];
           placement.kind = widgetKind;
           placement.custom = widgetCustom;
-          placement.slim = widgetSlim;
+          placement.rows = widgetRows;
           placement.autoHide = item["autoHide"] | false;
           placement.row = (uint8_t)(widgetSlot / 3);
           if (widgetShowsElement(widgetKind, widgetCustom, WIDGET_WEATHER)) weatherWidgetPlaced = true;
@@ -20688,15 +20693,15 @@ void loadRuntimeModel(JsonDocument &doc) {
         uint8_t widgetSlot = alignSlotToRow(constrain((int)(item["slot"] | slotCursor), 0, 254));
         uint8_t widgetKind = WIDGET_MEDIA;
         uint8_t widgetCustom = WIDGET_NO_CUSTOM;
-        bool widgetSlim = false;
-        parseWidgetItem(item, widgetKind, widgetCustom, widgetSlim);
-        slotCursor = (uint8_t)constrain((int)widgetSlot + (widgetSlim ? 3 : 6), 0, 254);
+        uint8_t widgetRows = 2;
+        parseWidgetItem(item, widgetKind, widgetCustom, widgetRows);
+        slotCursor = (uint8_t)constrain((int)widgetSlot + widgetRows * 3, 0, 254);
         if (device->widgetCount >= MAX_DEVICE_WIDGETS) continue;
         if (widgetKind == WIDGET_CUSTOM && widgetCustom == WIDGET_NO_CUSTOM) continue;
         DeviceWidget &placement = device->widgets[device->widgetCount++];
         placement.kind = widgetKind;
         placement.custom = widgetCustom;
-        placement.slim = widgetSlim;
+        placement.rows = widgetRows;
         placement.autoHide = item["autoHide"] | false;
         placement.slot = widgetSlot;
         if (widgetShowsElement(widgetKind, widgetCustom, WIDGET_WEATHER)) weatherWidgetPlaced = true;
@@ -39178,11 +39183,11 @@ void renderActivitiesPage() {
   bool rowTaken[24] = {};
   for (uint8_t w = 0; w < activitiesWidgetCount; w++) {
     uint8_t row = activitiesWidgets[w].row;
-    if (row + 1 >= (uint8_t)(sizeof(rowTaken) / sizeof(rowTaken[0]))) continue;
-    rowTaken[row] = true;
-    if (!activitiesWidgets[w].slim) rowTaken[row + 1] = true;
+    uint8_t rows = max((uint8_t)1, activitiesWidgets[w].rows);
+    if (row + rows > (uint8_t)(sizeof(rowTaken) / sizeof(rowTaken[0]))) continue;
+    for (uint8_t r = 0; r < rows; r++) rowTaken[row + r] = true;
     makeWidgetTile((uint8_t)(row * 3), activitiesWidgets[w].kind,
-                   activitiesWidgets[w].custom, activitiesWidgets[w].slim, activitiesOrigin,
+                   activitiesWidgets[w].custom, rows, activitiesOrigin,
                    activitiesWidgets[w].autoHide);
   }
 
@@ -41919,14 +41924,16 @@ bool openLiveWidgetForUsb(uint8_t index) {
   themeGridStartY() - the two differ, and a widget placed at the wrong origin
   lands on top of the first activity.
 */
-void makeWidgetTile(uint8_t slot, uint8_t kind, uint8_t custom, bool slim, int originY,
+void makeWidgetTile(uint8_t slot, uint8_t kind, uint8_t custom, uint8_t rows, int originY,
                     bool autoHide) {
   uint8_t needed = widgetInstancesNeeded(kind, custom);
   if (!needed || widgetInstanceCount + needed > MAX_LIVE_WIDGETS) return;
+  rows = constrain(rows, (uint8_t)1, (uint8_t)5);
+  bool slim = rows == 1;
   uint8_t row = slot / 3;
-  notePopulatedRemoteRow(row);
-  if (!slim) notePopulatedRemoteRow(row + 1);
-  int height = slim ? WIDGET_SLIM_HEIGHT : WIDGET_TILE_HEIGHT;
+  for (uint8_t r = 0; r < rows; r++) notePopulatedRemoteRow(row + r);
+  // Rows of 44px on a 52px pitch: 44, 96, 148, 200, 252.
+  int height = rows * 52 - 8;
 
   lv_obj_t *card = lv_obj_create(content);
   lv_obj_remove_style_all(card);
@@ -41937,8 +41944,12 @@ void makeWidgetTile(uint8_t slot, uint8_t kind, uint8_t custom, bool slim, int o
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(card, LV_OBJ_FLAG_GESTURE_BUBBLE);
-  lv_obj_add_event_cb(card, widgetTileEvent, LV_EVENT_CLICKED,
-                      (void *)(((uintptr_t)custom << 8) | kind));
+  // A Now Playing widget of four or five rows already is the expanded view,
+  // keys and all, so a tap between its keys opens nothing.
+  if (!(kind == WIDGET_NOWPLAYING && rows >= 4)) {
+    lv_obj_add_event_cb(card, widgetTileEvent, LV_EVENT_CLICKED,
+                        (void *)(((uintptr_t)custom << 8) | kind));
+  }
 
   uint8_t built = buildWidgetContents(card, kind, custom, WIDGET_TILE_WIDTH, height,
     false, slim, &widgetInstances[widgetInstanceCount],
@@ -41949,7 +41960,7 @@ void makeWidgetTile(uint8_t slot, uint8_t kind, uint8_t custom, bool slim, int o
   widgetInstanceCount += built;
   // One row, or two plus the gap between them, freed while nothing plays.
   if (autoHide && widgetIsMediaOnly(kind, custom)) {
-    registerAutoHideWidget(card, height, slim ? 52 : 104);
+    registerAutoHideWidget(card, height, rows * 52);
   }
 }
 
@@ -42921,7 +42932,7 @@ void renderActivityPage() {
   for (uint8_t i = 0; i < count && i < MAX_ACTIVITY_TILES; i++) {
     if (tiles[i].kind == Tile::WIDGET) {
       makeWidgetTile(tiles[i].slot, tiles[i].widgetKind, tiles[i].widgetCustom,
-                     tiles[i].widgetSlim, -1, tiles[i].widgetAutoHide);
+                     tiles[i].widgetRows, -1, tiles[i].widgetAutoHide);
       continue;
     }
     if (tiles[i].kind == Tile::ACTIVITY) {
@@ -42990,7 +43001,7 @@ void renderDevicePage() {
     makeWidgetTile(devices[activeDevice].widgets[i].slot,
                    devices[activeDevice].widgets[i].kind,
                    devices[activeDevice].widgets[i].custom,
-                   devices[activeDevice].widgets[i].slim, -1,
+                   devices[activeDevice].widgets[i].rows, -1,
                    devices[activeDevice].widgets[i].autoHide);
   }
 
@@ -43016,8 +43027,9 @@ void renderDevicePage() {
     memset(widgetRow, 0, sizeof(widgetRow));
     for (uint8_t w = 0; w < devices[activeDevice].widgetCount; w++) {
       uint8_t wr = devices[activeDevice].widgets[w].slot / 3;
-      widgetRow[wr] = true;
-      if (!devices[activeDevice].widgets[w].slim && wr < 255) widgetRow[wr + 1] = true;
+      for (uint8_t r = 0; r < max((uint8_t)1, devices[activeDevice].widgets[w].rows); r++) {
+        if (wr + r < 256) widgetRow[wr + r] = true;
+      }
     }
     uint16_t row = 0;
     for (uint8_t k = 0; k < onPage; k++) {

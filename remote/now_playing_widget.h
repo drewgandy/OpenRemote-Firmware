@@ -201,8 +201,17 @@ enum NpAction : uint8_t {
 volatile uint8_t npPendingAction = NP_ACT_NONE;
 volatile uint8_t npPendingIndex = 0;
 
+/* Which face a widget draws, chosen from its height. */
+enum NpLayout : uint8_t {
+  NP_LAYOUT_SLIM = 0,    // 1 row, 224x44
+  NP_LAYOUT_TWO,         // 2 rows, 224x96
+  NP_LAYOUT_THREE,       // 3 rows, 224x148
+  NP_LAYOUT_FULL         // 4-5 rows (224x200, 224x252) or the expanded view
+};
+
 struct NowPlayingUi {
-  bool expanded;
+  uint8_t layout;        // NpLayout
+  bool expanded;         // in the expanded overlay rather than on the page
   bool slim;
   bool hasMedia;
   bool hasVolume;
@@ -230,8 +239,12 @@ struct NowPlayingUi {
   lv_obj_t *backLabel;
   lv_obj_t *forwardLabel;
   lv_obj_t *mediaPowerBtn;
+  // Two- and three-row faces reflow when artwork or a position appears.
+  int8_t flowArt;        // -1 not laid out yet
+  int8_t flowTimed;
   // Volume strip / row
   lv_obj_t *volIcon;
+  lv_obj_t *volDetail;   // input and sound mode, under the name (2-3 rows)
   lv_obj_t *volLabel;
   lv_obj_t *volValue;
   lv_obj_t *volKeys;      // - mute + Receiver (expanded)
@@ -1552,17 +1565,6 @@ static void npBuildArt(NowPlayingUi *ui, lv_obj_t *parent, int x, int y, int siz
   lv_obj_add_flag(ui->art, LV_OBJ_FLAG_HIDDEN);
 }
 
-/* The compact volume line: icon, "Den Denon - TV Audio - Dolby Atmos", level. */
-static void npBuildVolumeStrip(NowPlayingUi *ui, lv_obj_t *parent, int y, int width,
-                               const lv_font_t *valueFont) {
-  ui->volIcon = makeLabel(parent, LV_SYMBOL_VOLUME_MAX, 10, y + 4, &lv_font_montserrat_12,
-                          npVolumeColour());
-  ui->volLabel = makeWidgetLabel(parent, "", 28, y + 5, &lv_font_montserrat_10,
-                                 widgetMutedColour(), width - 28 - 78);
-  ui->volValue = makeWidgetLabel(parent, "--", width - 80, y + 1, valueFont,
-                                 textPrimary(), 72, LV_TEXT_ALIGN_RIGHT);
-}
-
 static void npDeleted(lv_event_t *event) {
   NowPlayingUi *ui = (NowPlayingUi *)lv_event_get_user_data(event);
   if (ui) lv_mem_free(ui);
@@ -1575,6 +1577,148 @@ static void npBuildReceiverPanel(NowPlayingUi *ui, lv_obj_t *parent, int width, 
   Builds the face into `parent`. Large tile 224x96, slim 224x44, expanded
   228x268. Labels are written by refreshNowPlayingUi().
 */
+static void npSetHidden(lv_obj_t *obj, bool hidden);
+bool nowPlayingExpandedOpen();
+
+/* The transport row (back, play/pause, forward) centred at y, keys h high. */
+static void npBuildTransport(NowPlayingUi *ui, lv_obj_t *panel, int width, int y, int h) {
+  ui->transport = npBox(panel, 0, y, width, h);
+  int side = h - 6;
+  npKey(ui->transport, width / 2 - 78, 3, 50, side, LV_SYMBOL_PREV, &lv_font_montserrat_14,
+        NP_ACT_BACK, 0, &ui->backLabel);
+  npKey(ui->transport, width / 2 - h / 2, 0, h, h, LV_SYMBOL_PLAY, &lv_font_montserrat_16,
+        NP_ACT_PLAY_PAUSE, 0, &ui->playLabel, true);
+  npKey(ui->transport, width / 2 + 28, 3, 50, side, LV_SYMBOL_NEXT, &lv_font_montserrat_14,
+        NP_ACT_FORWARD, 0, &ui->forwardLabel);
+  ui->mediaPowerBtn = npKey(panel, width / 2 - 50, y + 2, 100, h - 4,
+                            LV_SYMBOL_POWER " Turn on", &lv_font_montserrat_12,
+                            NP_ACT_MEDIA_POWER);
+  lv_obj_add_flag(ui->mediaPowerBtn, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* The volume row of the full face: label and level, then - mute + Receiver. */
+static void npBuildVolumeRow(NowPlayingUi *ui, lv_obj_t *panel, int width, int y) {
+  const lv_color_t muted = widgetMutedColour();
+  lv_obj_t *line = glyphBar(panel, 10, y, width - 20, 1, 0, lv_color_white());
+  lv_obj_set_style_bg_opa(line, LV_OPA_20, 0);
+  ui->volIcon = makeLabel(panel, LV_SYMBOL_VOLUME_MAX, 12, y + 6, &lv_font_montserrat_12,
+                          npVolumeColour());
+  ui->volLabel = makeWidgetLabel(panel, "", 30, y + 6, &lv_font_montserrat_12, muted,
+                                 width - 30 - 90);
+  ui->volValue = makeWidgetLabel(panel, "--", width - 92, y + 2, &lv_font_montserrat_18,
+                                 textPrimary(), 80, LV_TEXT_ALIGN_RIGHT);
+  bool receiver = npSettings.allowInput || npSettings.allowSoundMode;
+  ui->volKeys = npBox(panel, 0, y + 24, width, 26);
+  int keyW = receiver ? 44 : (width - 24 - 12) / 3;
+  int x = 12;
+  npKey(ui->volKeys, x, 0, keyW, 24, LV_SYMBOL_MINUS, &lv_font_montserrat_12, NP_ACT_VOLUME_DOWN);
+  x += keyW + 6;
+  npKey(ui->volKeys, x, 0, keyW, 24, LV_SYMBOL_MUTE, &lv_font_montserrat_12, NP_ACT_MUTE, 0,
+        &ui->muteLabel);
+  x += keyW + 6;
+  npKey(ui->volKeys, x, 0, keyW, 24, LV_SYMBOL_PLUS, &lv_font_montserrat_12, NP_ACT_VOLUME_UP);
+  x += keyW + 6;
+  if (receiver) {
+    ui->receiverBtn = npKey(ui->volKeys, x, 0, width - 12 - x, 24, "Receiver " LV_SYMBOL_RIGHT,
+                            &lv_font_montserrat_10, NP_ACT_SHOW_RECEIVER);
+  }
+  ui->volPowerBtn = npKey(panel, 12, y + 24, width - 24, 24, LV_SYMBOL_POWER " Turn on",
+                          &lv_font_montserrat_12, NP_ACT_VOLUME_POWER);
+  lv_obj_add_flag(ui->volPowerBtn, LV_OBJ_FLAG_HIDDEN);
+}
+
+/*
+  Two and three rows: the media half's pieces move to suit what the player
+  actually reports. Without artwork the text takes the whole width; without
+  a position the progress row is dropped and the text sits lower.
+*/
+static void npReflow(NowPlayingUi *ui, bool art, bool timed) {
+  if (ui->layout != NP_LAYOUT_TWO && ui->layout != NP_LAYOUT_THREE) return;
+  if (!ui->hasMedia || !ui->mediaPanel) return;
+  if (ui->flowArt == (int8_t)art && ui->flowTimed == (int8_t)timed) return;
+  ui->flowArt = (int8_t)art;
+  ui->flowTimed = (int8_t)timed;
+  const int w = ui->width;
+  const bool three = ui->layout == NP_LAYOUT_THREE;
+  const int mediaH = lv_obj_get_height(ui->mediaPanel);
+  int artSize = three ? 64 : (timed ? 30 : 40);
+  if (!ui->hasVolume) artSize = three ? 96 : 72;
+  int artY = three || !ui->hasVolume ? 8 : 6;
+  npSetHidden(ui->artBox, !art);
+  if (art && ui->artBox) {
+    lv_obj_set_pos(ui->artBox, 10, artY);
+    lv_obj_set_size(ui->artBox, artSize, artSize);
+    ui->artSize = (int16_t)artSize;
+    ui->artShown = (const void *)1;   // re-apply the zoom for the new size
+  }
+  int textX = art ? 10 + artSize + 10 : 10;
+  int textW = w - textX - 10;
+  // Text block: title (16 px) and one line under it (12 px).
+  int blockH = 40;
+  int progressH = timed ? 16 : 0;
+  int textY;
+  if (three) {
+    textY = art ? artY + 4 : 10;
+  } else if (!ui->hasVolume) {
+    textY = (mediaH - blockH - progressH) / 2;
+  } else {
+    textY = timed ? 4 : 8;
+  }
+  lv_obj_set_pos(ui->title, textX, textY);
+  lv_obj_set_width(ui->title, textW);
+  lv_obj_set_pos(ui->subtitle, textX, textY + 21);
+  lv_obj_set_width(ui->subtitle, textW);
+  if (timed) {
+    // On one line: elapsed, the bar, remaining - full width on three rows,
+    // beside the artwork on two.
+    int rowX = three ? 10 : textX;
+    int rowW = three ? w - 20 : textW;
+    int rowY = three ? (art ? artY + artSize + 8 : textY + 46) : textY + 38;
+    if (!three && !ui->hasVolume) rowY = textY + blockH + 2;
+    lv_obj_set_pos(ui->left, rowX, rowY);
+    lv_obj_set_pos(ui->right, rowX + rowW - 40, rowY);
+    ui->trackWidth = (int16_t)(rowW - 84);
+    lv_obj_set_pos(ui->track, rowX + 42, rowY + 5);
+    lv_obj_set_width(ui->track, ui->trackWidth);
+  }
+}
+
+static void npBuildMediaText(NowPlayingUi *ui, lv_obj_t *panel) {
+  const lv_color_t muted = widgetMutedColour();
+  npBuildArt(ui, panel, 10, 6, 40);
+  ui->title = npScrollingLabel(panel, 10, 8, ui->width - 20, &lv_font_montserrat_16,
+                               textPrimary(), LV_TEXT_ALIGN_LEFT);
+  ui->subtitle = makeWidgetLabel(panel, "", 10, 29, &lv_font_montserrat_12, muted,
+                                 ui->width - 20);
+  ui->track = npTrack(panel, 52, 50, 120, 3, npAccent(), &ui->fill);
+  ui->trackWidth = 120;
+  ui->left = makeWidgetLabel(panel, "", 10, 45, &lv_font_montserrat_10, muted, 40);
+  ui->right = makeWidgetLabel(panel, "", ui->width - 50, 45, &lv_font_montserrat_10, muted, 40,
+                              LV_TEXT_ALIGN_RIGHT);
+}
+
+/* The volume half of the two- and three-row faces. */
+static void npBuildVolumeBlock(NowPlayingUi *ui, lv_obj_t *parent, int y, int h, bool big) {
+  const lv_color_t muted = widgetMutedColour();
+  const int w = ui->width;
+  int nameY = y + (h - (big ? 38 : 34)) / 2;
+  ui->volIcon = makeLabel(parent, LV_SYMBOL_VOLUME_MAX, 10, nameY + (big ? 9 : 8),
+                          big ? &lv_font_montserrat_18 : &lv_font_montserrat_16, npVolumeColour());
+  ui->volLabel = makeWidgetLabel(parent, "", 34, nameY, big ? &lv_font_montserrat_16
+                                                            : &lv_font_montserrat_14,
+                                 textPrimary(), w - 34 - 96);
+  ui->volDetail = makeWidgetLabel(parent, "", 34, nameY + (big ? 21 : 18), &lv_font_montserrat_12,
+                                  muted, w - 34 - 96);
+  ui->volValue = makeWidgetLabel(parent, "--", w - 102, y + (h - 28) / 2, &lv_font_montserrat_24,
+                                 textPrimary(), 92, LV_TEXT_ALIGN_RIGHT);
+}
+
+/*
+  Builds the face into `parent`; refreshNowPlayingUi() writes the labels.
+  The layout follows the height: one row, two, three, or the full face -
+  transport keys and volume keys included - at four or five rows and in the
+  expanded view.
+*/
 NowPlayingUi *buildNowPlayingFace(lv_obj_t *parent, int width, int height, bool expanded,
                                   bool slim) {
   NowPlayingUi *ui = (NowPlayingUi *)lv_mem_alloc(sizeof(NowPlayingUi));
@@ -1582,146 +1726,115 @@ NowPlayingUi *buildNowPlayingFace(lv_obj_t *parent, int width, int height, bool 
   memset(ui, 0, sizeof(*ui));
   ui->expanded = expanded;
   ui->slim = slim && !expanded;
+  ui->layout = expanded || height >= 190 ? NP_LAYOUT_FULL
+             : ui->slim || height < 70 ? NP_LAYOUT_SLIM
+             : height < 120 ? NP_LAYOUT_TWO : NP_LAYOUT_THREE;
   ui->hasMedia = npHalfActive(npSettings.media);
   ui->hasVolume = npHalfActive(npSettings.volume);
   ui->width = (int16_t)width;
   ui->height = (int16_t)height;
   ui->rxListHash = 0xFFFFFFFFUL;
+  ui->flowArt = ui->flowTimed = -1;
   lv_obj_add_event_cb(parent, npDeleted, LV_EVENT_DELETE, ui);
   const lv_color_t muted = widgetMutedColour();
 
   if (!ui->hasMedia && !ui->hasVolume) {
-    makeWidgetLabel(parent, "Now Playing", 0, slim ? 6 : 26, &lv_font_montserrat_14,
+    int y = ui->layout == NP_LAYOUT_SLIM ? 6 : height / 2 - 20;
+    makeWidgetLabel(parent, "Now Playing", 0, y, &lv_font_montserrat_14,
                     textPrimary(), width, LV_TEXT_ALIGN_CENTER);
-    makeWidgetLabel(parent, "Choose the players in WebConfig", 0, slim ? 24 : 48,
+    makeWidgetLabel(parent, "Choose the players in WebConfig", 0, y + 18,
                     &lv_font_montserrat_10, muted, width, LV_TEXT_ALIGN_CENTER);
     return ui;
   }
 
-  if (ui->slim) {
+  if (ui->layout == NP_LAYOUT_SLIM) {
     // One row: artwork, title and app, the level on the right.
     int textX = 10;
     if (ui->hasMedia) {
       npBuildArt(ui, parent, 6, 6, 32);
       textX = 46;
       int textW = width - textX - (ui->hasVolume ? 84 : 8);
-      ui->title = npScrollingLabel(parent, textX, 6, textW, &lv_font_montserrat_12,
+      ui->title = npScrollingLabel(parent, textX, 5, textW, &lv_font_montserrat_14,
                                    textPrimary(), LV_TEXT_ALIGN_LEFT);
-      ui->tag = makeWidgetLabel(parent, "", textX, 24, &lv_font_montserrat_10, muted, textW);
+      ui->subtitle = makeWidgetLabel(parent, "", textX, 24, &lv_font_montserrat_10, muted, textW);
     } else {
-      ui->volLabel = makeWidgetLabel(parent, "", 32, 15, &lv_font_montserrat_12, muted,
-                                     width - 32 - 84);
-      ui->volIcon = makeLabel(parent, LV_SYMBOL_VOLUME_MAX, 10, 14, &lv_font_montserrat_14,
+      ui->volIcon = makeLabel(parent, LV_SYMBOL_VOLUME_MAX, 10, 13, &lv_font_montserrat_16,
                               npVolumeColour());
+      ui->volLabel = makeWidgetLabel(parent, "", 34, 5, &lv_font_montserrat_14, textPrimary(),
+                                     width - 34 - 92);
+      ui->volDetail = makeWidgetLabel(parent, "", 34, 24, &lv_font_montserrat_10, muted,
+                                      width - 34 - 92);
     }
     if (ui->hasVolume) {
-      ui->volValue = makeWidgetLabel(parent, "--", width - 82, 13, &lv_font_montserrat_14,
-                                     textPrimary(), 74, LV_TEXT_ALIGN_RIGHT);
+      ui->volValue = makeWidgetLabel(parent, "--", width - 90, 10, &lv_font_montserrat_20,
+                                     textPrimary(), 82, LV_TEXT_ALIGN_RIGHT);
     }
     return ui;
   }
 
-  if (!expanded) {
+  if (ui->layout == NP_LAYOUT_TWO || ui->layout == NP_LAYOUT_THREE) {
+    bool three = ui->layout == NP_LAYOUT_THREE;
     if (ui->hasMedia) {
-      int mediaH = ui->hasVolume ? 68 : height;
-      int art = ui->hasVolume ? 56 : 72;
-      int artY = (mediaH - art) / 2;
+      int mediaH = ui->hasVolume ? (three ? 96 : 52) : height;
       ui->mediaPanel = npBox(parent, 0, 0, width, mediaH);
-      npBuildArt(ui, ui->mediaPanel, 8, artY, art);
-      int textX = 8 + art + 9;
-      int textW = width - textX - 8;
-      int y = ui->hasVolume ? 5 : 12;
-      ui->tag = makeWidgetLabel(ui->mediaPanel, "", textX, y, &lv_font_montserrat_10, muted, textW);
-      ui->title = npScrollingLabel(ui->mediaPanel, textX, y + 13, textW, &lv_font_montserrat_14,
-                                   textPrimary(), LV_TEXT_ALIGN_LEFT);
-      ui->subtitle = makeWidgetLabel(ui->mediaPanel, "", textX, y + 31, &lv_font_montserrat_10,
-                                     muted, textW);
-      ui->trackWidth = (int16_t)textW;
-      ui->track = npTrack(ui->mediaPanel, textX, y + 46, textW, 3, npAccent(), &ui->fill);
-      ui->left = makeWidgetLabel(ui->mediaPanel, "", textX, y + 51, &lv_font_montserrat_10,
-                                 muted, 60);
-      ui->stateGlyph = makeWidgetLabel(ui->mediaPanel, "", textX + textW / 2 - 10, y + 51,
-                                       &lv_font_montserrat_10, muted, 20, LV_TEXT_ALIGN_CENTER);
-      ui->right = makeWidgetLabel(ui->mediaPanel, "", textX + textW - 60, y + 51,
-                                  &lv_font_montserrat_10, muted, 60, LV_TEXT_ALIGN_RIGHT);
+      npBuildMediaText(ui, ui->mediaPanel);
       if (ui->hasVolume) {
-        lv_obj_t *line = glyphBar(parent, 8, 69, width - 16, 1, 0, lv_color_white());
+        lv_obj_t *line = glyphBar(parent, 10, mediaH, width - 20, 1, 0, lv_color_white());
         lv_obj_set_style_bg_opa(line, LV_OPA_20, 0);
-        npBuildVolumeStrip(ui, parent, 71, width, &lv_font_montserrat_14);
+        npBuildVolumeBlock(ui, parent, mediaH + 1, height - mediaH - 1, three);
       }
+      npReflow(ui, false, false);
     } else {
-      // Volume only: the level large, the receiver's name and input under it.
-      ui->volLabel = makeWidgetLabel(parent, "", 10, 10, &lv_font_montserrat_10, muted,
-                                     width - 20, LV_TEXT_ALIGN_CENTER);
-      ui->volValue = makeWidgetLabel(parent, "--", 10, 28, &lv_font_montserrat_24,
-                                     textPrimary(), width - 20, LV_TEXT_ALIGN_CENTER);
-      ui->volIcon = makeWidgetLabel(parent, "", 10, 62, &lv_font_montserrat_12,
-                                    npVolumeColour(), width - 20, LV_TEXT_ALIGN_CENTER);
+      // Volume only: the whole tile.
+      npBuildVolumeBlock(ui, parent, 0, height, true);
     }
     return ui;
   }
 
-  // Expanded.
+  // The full face: four or five rows, or the expanded view.
   if (ui->hasMedia) {
     ui->mediaPanel = npBox(parent, 0, 0, width, height);
     ui->tag = makeWidgetLabel(ui->mediaPanel, "", 12, 7, &lv_font_montserrat_10, muted,
                               width - 44);
-    makeLabel(ui->mediaPanel, LV_SYMBOL_CLOSE, width - 22, 5, &lv_font_montserrat_12, muted);
-    const int art = NP_ART_SIZE;
-    npBuildArt(ui, ui->mediaPanel, (width - art) / 2, 23, art);
-    ui->title = npScrollingLabel(ui->mediaPanel, 12, 123, width - 24, &lv_font_montserrat_16,
-                                 textPrimary(), LV_TEXT_ALIGN_CENTER);
-    ui->subtitle = makeWidgetLabel(ui->mediaPanel, "", 12, 143, &lv_font_montserrat_12, muted,
-                                   width - 24, LV_TEXT_ALIGN_CENTER);
-    ui->trackWidth = (int16_t)(width - 32);
-    ui->track = npTrack(ui->mediaPanel, 16, 161, width - 32, 4, npAccent(), &ui->fill);
-    ui->left = makeWidgetLabel(ui->mediaPanel, "", 16, 167, &lv_font_montserrat_10, muted, 60);
-    ui->right = makeWidgetLabel(ui->mediaPanel, "", width - 76, 167, &lv_font_montserrat_10,
-                                muted, 60, LV_TEXT_ALIGN_RIGHT);
-    ui->transport = npBox(ui->mediaPanel, 0, 180, width, 38);
-    npKey(ui->transport, width / 2 - 78, 4, 50, 30, LV_SYMBOL_PREV, &lv_font_montserrat_14,
-          NP_ACT_BACK, 0, &ui->backLabel);
-    npKey(ui->transport, width / 2 - 19, 0, 38, 38, LV_SYMBOL_PLAY, &lv_font_montserrat_16,
-          NP_ACT_PLAY_PAUSE, 0, &ui->playLabel, true);
-    npKey(ui->transport, width / 2 + 28, 4, 50, 30, LV_SYMBOL_NEXT, &lv_font_montserrat_14,
-          NP_ACT_FORWARD, 0, &ui->forwardLabel);
-    ui->mediaPowerBtn = npKey(ui->mediaPanel, width / 2 - 50, 182, 100, 32,
-                              LV_SYMBOL_POWER " Turn on", &lv_font_montserrat_12,
-                              NP_ACT_MEDIA_POWER);
-    lv_obj_add_flag(ui->mediaPowerBtn, LV_OBJ_FLAG_HIDDEN);
-
-    if (ui->hasVolume) {
-      lv_obj_t *line = glyphBar(ui->mediaPanel, 10, 222, width - 20, 1, 0, lv_color_white());
-      lv_obj_set_style_bg_opa(line, LV_OPA_20, 0);
-      ui->volIcon = makeLabel(ui->mediaPanel, LV_SYMBOL_VOLUME_MAX, 12, 228,
-                              &lv_font_montserrat_10, npVolumeColour());
-      ui->volLabel = makeWidgetLabel(ui->mediaPanel, "", 28, 228, &lv_font_montserrat_10, muted,
-                                     width - 28 - 84);
-      ui->volValue = makeWidgetLabel(ui->mediaPanel, "--", width - 84, 225,
-                                     &lv_font_montserrat_14, textPrimary(), 72,
-                                     LV_TEXT_ALIGN_RIGHT);
-      bool receiver = npSettings.allowInput || npSettings.allowSoundMode;
-      ui->volKeys = npBox(ui->mediaPanel, 0, 242, width, 24);
-      int keyW = receiver ? 44 : (width - 24 - 12) / 3;
-      int x = 12;
-      npKey(ui->volKeys, x, 0, keyW, 22, LV_SYMBOL_MINUS, &lv_font_montserrat_12,
-            NP_ACT_VOLUME_DOWN);
-      x += keyW + 6;
-      npKey(ui->volKeys, x, 0, keyW, 22, LV_SYMBOL_MUTE, &lv_font_montserrat_12, NP_ACT_MUTE, 0,
-            &ui->muteLabel);
-      x += keyW + 6;
-      npKey(ui->volKeys, x, 0, keyW, 22, LV_SYMBOL_PLUS, &lv_font_montserrat_12,
-            NP_ACT_VOLUME_UP);
-      x += keyW + 6;
-      if (receiver) {
-        ui->receiverBtn = npKey(ui->volKeys, x, 0, width - 12 - x, 22, "Receiver " LV_SYMBOL_RIGHT,
-                                &lv_font_montserrat_10, NP_ACT_SHOW_RECEIVER);
-      }
-      ui->volPowerBtn = npKey(ui->mediaPanel, 12, 242, width - 24, 22,
-                              LV_SYMBOL_POWER " Turn on", &lv_font_montserrat_12,
-                              NP_ACT_VOLUME_POWER);
-      lv_obj_add_flag(ui->volPowerBtn, LV_OBJ_FLAG_HIDDEN);
+    if (expanded) makeLabel(ui->mediaPanel, LV_SYMBOL_CLOSE, width - 22, 5, &lv_font_montserrat_12, muted);
+    int volumeH = ui->hasVolume ? 52 : 0;
+    if (height >= 240) {
+      // Stacked: artwork centred, title and progress under it.
+      int art = height >= 264 ? NP_ART_SIZE : 80;
+      npBuildArt(ui, ui->mediaPanel, (width - art) / 2, 22, art);
+      int y = 22 + art + 4;
+      ui->title = npScrollingLabel(ui->mediaPanel, 12, y, width - 24, &lv_font_montserrat_16,
+                                   textPrimary(), LV_TEXT_ALIGN_CENTER);
+      ui->subtitle = makeWidgetLabel(ui->mediaPanel, "", 12, y + 20, &lv_font_montserrat_12, muted,
+                                     width - 24, LV_TEXT_ALIGN_CENTER);
+      y += 38;
+      ui->trackWidth = (int16_t)(width - 32);
+      ui->track = npTrack(ui->mediaPanel, 16, y, width - 32, 4, npAccent(), &ui->fill);
+      ui->left = makeWidgetLabel(ui->mediaPanel, "", 16, y + 6, &lv_font_montserrat_10, muted, 60);
+      ui->right = makeWidgetLabel(ui->mediaPanel, "", width - 76, y + 6, &lv_font_montserrat_10,
+                                  muted, 60, LV_TEXT_ALIGN_RIGHT);
+      int transportY = y + 18;
+      int transportH = height - volumeH - transportY - 6;
+      npBuildTransport(ui, ui->mediaPanel, width, transportY, constrain(transportH, 30, 38));
+    } else {
+      // Side by side: artwork left of the title, to fit four rows.
+      int art = 56;
+      npBuildArt(ui, ui->mediaPanel, 12, 22, art);
+      ui->title = npScrollingLabel(ui->mediaPanel, 12 + art + 10, 26, width - art - 34,
+                                   &lv_font_montserrat_16, textPrimary(), LV_TEXT_ALIGN_LEFT);
+      ui->subtitle = makeWidgetLabel(ui->mediaPanel, "", 12 + art + 10, 48, &lv_font_montserrat_12,
+                                     muted, width - art - 34);
+      int y = 22 + art + 8;
+      ui->trackWidth = (int16_t)(width - 32);
+      ui->track = npTrack(ui->mediaPanel, 16, y, width - 32, 4, npAccent(), &ui->fill);
+      ui->left = makeWidgetLabel(ui->mediaPanel, "", 16, y + 6, &lv_font_montserrat_10, muted, 60);
+      ui->right = makeWidgetLabel(ui->mediaPanel, "", width - 76, y + 6, &lv_font_montserrat_10,
+                                  muted, 60, LV_TEXT_ALIGN_RIGHT);
+      int transportY = y + 18;
+      npBuildTransport(ui, ui->mediaPanel, width, transportY,
+                       constrain(height - volumeH - transportY - 6, 28, 36));
     }
+    if (ui->hasVolume) npBuildVolumeRow(ui, ui->mediaPanel, width, height - volumeH);
   }
   if (ui->hasVolume) {
     npBuildReceiverPanel(ui, parent, width, height, ui->hasMedia);
@@ -1743,7 +1856,7 @@ static void npBuildReceiverPanel(NowPlayingUi *ui, lv_obj_t *parent, int width, 
   } else {
     ui->rxName = makeWidgetLabel(ui->rxPanel, "", 12, 8, &lv_font_montserrat_10, muted,
                                  width - 44);
-    makeLabel(ui->rxPanel, LV_SYMBOL_CLOSE, width - 22, 5, &lv_font_montserrat_12, muted);
+    if (ui->expanded) makeLabel(ui->rxPanel, LV_SYMBOL_CLOSE, width - 22, 5, &lv_font_montserrat_12, muted);
   }
   ui->rxValue = makeWidgetLabel(ui->rxPanel, "--", 0, 28, &lv_font_montserrat_24, textPrimary(),
                                 width, LV_TEXT_ALIGN_CENTER);
@@ -1856,42 +1969,77 @@ static void npRefreshArt(NowPlayingUi *ui, bool show) {
   }
 }
 
+/* Input and sound mode (or the state), optionally after the receiver's name:
+   "Den Denon - TV Audio - Dolby Atmos", "Muted - TV Audio". */
 static void npVolumeDetail(char *out, size_t size, bool withName) {
   const NpEntityState &v = npVolume;
   const char *name = npHalfName(npSettings.volume, v, "Receiver");
   if (!v.valid) { snprintf(out, size, "%s%s", withName ? name : "", withName ? " - offline" : "Offline"); return; }
-  if (npIsOff(v)) { snprintf(out, size, "%s is off", name); return; }
+  if (npIsOff(v)) { snprintf(out, size, withName ? "%s is off" : "Off", name); return; }
   String text = withName ? String(name) : String();
+  bool muted = v.muted && !v.guessed;
+  if (muted && !withName) text = "Muted";
   if (v.source[0]) { if (text.length()) text += " - "; text += v.source; }
-  if (v.muted) { if (text.length()) text += " - "; text += "Muted"; }
-  else if (v.soundMode[0]) { if (text.length()) text += " - "; text += v.soundMode; }
+  if (muted && withName) { text += " - Muted"; }
+  else if (!muted && v.soundMode[0]) { if (text.length()) text += " - "; text += v.soundMode; }
   strlcpy(out, text.c_str(), size);
+}
+
+/*
+  The two lines of media text. The title is what is playing, else the app,
+  else the player; the line under it never repeats the title:
+    "The Diplomat" / "Netflix - S2 E4 - The Ghost"
+    "Apple TV"     / "Roku - Playing"     (the app is all a Roku reports)
+*/
+static void npMediaLines(const NpEntityState &m, char *title, size_t titleSize, char *line,
+                         size_t lineSize, bool withPlayer) {
+  bool off = npIsOff(m);
+  const char *name = npHalfName(npSettings.media, m, "Media player");
+  const char *status = !m.valid ? "Not reachable"
+    : off ? "Off" : npStateIs(m, "idle") ? "Idle"
+    : npStateIs(m, "paused") ? "Paused"
+    : npIsPlaying(m) ? "Playing" : "";
+  if (!m.valid || off || (!m.title[0] && !m.app[0])) {
+    strlcpy(title, name, titleSize);
+    strlcpy(line, status, lineSize);
+    return;
+  }
+  if (m.title[0]) {
+    strlcpy(title, m.title, titleSize);
+    const char *who = m.app[0] ? m.app : (withPlayer ? name : "");
+    const char *what = m.subtitle[0] ? m.subtitle : (npStateIs(m, "paused") ? "Paused" : "");
+    snprintf(line, lineSize, "%s%s%s", who, who[0] && what[0] ? " - " : "", what);
+    return;
+  }
+  // Only the app is known.
+  strlcpy(title, m.app, titleSize);
+  snprintf(line, lineSize, "%s%s%s", strcmp(m.app, name) ? name : "",
+           strcmp(m.app, name) && status[0] ? " - " : "", status);
 }
 
 void refreshNowPlayingUi(NowPlayingUi *ui) {
   if (!ui) return;
   char text[128];
+  const bool full = ui->layout == NP_LAYOUT_FULL;
 
   if (ui->hasMedia) {
     const NpEntityState &m = npMedia;
     bool off = npIsOff(m);
     bool playing = npIsPlaying(m);
-    const char *name = npHalfName(npSettings.media, m, "Media player");
-    // Who is playing what: "Netflix - Den Apple TV".
-    if (!off && m.app[0] && strcmp(m.app, name) != 0) snprintf(text, sizeof(text), "%s - %s", m.app, name);
-    else strlcpy(text, name, sizeof(text));
-    setWidgetLabelText(ui->tag, ui->slim && !off && m.app[0] ? m.app : text);
-
-    const char *title = m.title[0] ? m.title : (m.app[0] && !off ? m.app : name);
-    if (!m.valid) title = name;
+    char title[96], line[96];
+    npMediaLines(m, title, sizeof(title), line, sizeof(line), !full);
     setWidgetLabelText(ui->title, title);
-    const char *status = !m.valid ? "Not reachable"
-      : off ? "Off" : npStateIs(m, "idle") ? "Idle"
-      : npStateIs(m, "paused") ? "Paused"
-      : npIsPlaying(m) && !m.title[0] ? "Playing" : "";
-    setWidgetLabelText(ui->subtitle, m.subtitle[0] && !off ? m.subtitle : status);
+    if (full) {
+      // The full face names the player above the artwork, so the line under
+      // the title leaves it out.
+      const char *name = npHalfName(npSettings.media, m, "Media player");
+      setWidgetLabelText(ui->tag, name);
+    }
+    setWidgetLabelText(ui->subtitle, line);
 
     bool timed = !off && m.hasPosition && m.duration > 0;
+    bool art = npSettings.artwork && !off && m.valid && npMediaArtSource() != nullptr;
+    npReflow(ui, art, timed);
     npSetHidden(ui->track, !timed);
     npSetHidden(ui->left, !timed);
     npSetHidden(ui->right, !timed);
@@ -1901,14 +2049,17 @@ void refreshNowPlayingUi(NowPlayingUi *ui) {
       npSetFill(ui->fill, ui->trackWidth, (uint32_t)((uint64_t)position * 1000ULL / m.duration));
       formatWidgetClock(text, sizeof(text), position, false);
       setWidgetLabelText(ui->left, text);
-      if (ui->expanded) formatWidgetClock(text, sizeof(text), m.duration, false);
+      if (full) formatWidgetClock(text, sizeof(text), m.duration, false);
       else formatWidgetClock(text, sizeof(text), m.duration - position, true);
       setWidgetLabelText(ui->right, text);
       setWidgetLabelText(ui->stateGlyph, playing ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
     }
-    npRefreshArt(ui, npSettings.artwork && !off && m.valid);
+    // Two and three rows show artwork only when there is a picture; the
+    // others keep a placeholder in its frame.
+    if (ui->layout == NP_LAYOUT_TWO || ui->layout == NP_LAYOUT_THREE) npRefreshArt(ui, art);
+    else npRefreshArt(ui, npSettings.artwork && !off && m.valid);
 
-    if (ui->expanded) {
+    if (full) {
       bool canTurnOn = off && m.valid && npHasKey(npSettings.media, NPK_POWER_ON) &&
                        (npSettings.media.type != NP_SRC_HA || (m.supported & NP_FEATURE_TURN_ON));
       npSetHidden(ui->transport, off);
@@ -1924,54 +2075,50 @@ void refreshNowPlayingUi(NowPlayingUi *ui) {
   if (ui->hasVolume) {
     const NpEntityState &v = npVolume;
     bool off = npIsOff(v);
+    bool muted = v.muted && !off && !v.guessed;
     char level[24];
     npFormatVolume(level, sizeof(level), v);
     const char *value = !v.valid ? "--" : off ? "Off" : v.hasVolume ? level : "";
     if (ui->volValue) {
       setWidgetLabelText(ui->volValue, value);
-      lv_obj_set_style_text_decor(ui->volValue, v.muted && !off ? LV_TEXT_DECOR_STRIKETHROUGH
-                                                                : LV_TEXT_DECOR_NONE, 0);
-      lv_obj_set_style_text_color(ui->volValue, v.muted && !off ? widgetMutedColour()
-                                                                : textPrimary(), 0);
+      // Muted dims the level rather than striking it through.
+      lv_obj_set_style_text_color(ui->volValue, muted || off ? widgetMutedColour()
+                                                             : textPrimary(), 0);
     }
-    bool volumeOnly = !ui->hasMedia && !ui->expanded && !ui->slim;
-    if (volumeOnly) {
+    if (ui->volIcon) {
+      setWidgetLabelText(ui->volIcon, off ? LV_SYMBOL_POWER
+                                          : muted ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
+      lv_obj_set_style_text_color(ui->volIcon, off ? widgetMutedColour()
+                                  : muted ? npMutedRed() : npVolumeColour(), 0);
+    }
+    if (ui->volDetail) {
+      // Name on one line, input and sound mode (or "Muted") under it.
       setWidgetLabelText(ui->volLabel, npHalfName(npSettings.volume, v, "Receiver"));
       npVolumeDetail(text, sizeof(text), false);
-      setWidgetLabelText(ui->volIcon, text);
-      lv_obj_set_style_text_color(ui->volIcon, v.muted ? npMutedRed() : npVolumeColour(), 0);
-    } else {
+      setWidgetLabelText(ui->volDetail, text);
+      lv_obj_set_style_text_color(ui->volDetail, muted ? npMutedRed() : widgetMutedColour(), 0);
+    } else if (ui->volLabel) {
       npVolumeDetail(text, sizeof(text), true);
-      if (ui->volLabel) {
-        setWidgetLabelText(ui->volLabel, text);
-        lv_obj_set_style_text_color(ui->volLabel, v.muted && !off ? npMutedRed()
-                                                                  : widgetMutedColour(), 0);
-      }
-      if (ui->volIcon) {
-        setWidgetLabelText(ui->volIcon, off ? LV_SYMBOL_POWER
-                                            : v.muted ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
-        lv_obj_set_style_text_color(ui->volIcon, off ? widgetMutedColour()
-                                    : v.muted ? npMutedRed() : npVolumeColour(), 0);
-      }
+      setWidgetLabelText(ui->volLabel, text);
+      lv_obj_set_style_text_color(ui->volLabel, muted ? npMutedRed() : widgetMutedColour(), 0);
     }
 
-    if (ui->expanded) {
+    if (full) {
       bool canTurnOn = off && v.valid && npHasKey(npSettings.volume, NPK_POWER_ON);
       npSetHidden(ui->volKeys, off);
       npSetHidden(ui->volPowerBtn, !canTurnOn || !ui->hasMedia);
-      if (ui->muteLabel) setWidgetLabelText(ui->muteLabel,
-        v.muted && !v.guessed ? LV_SYMBOL_VOLUME_MAX : LV_SYMBOL_MUTE);
+      if (ui->muteLabel) setWidgetLabelText(ui->muteLabel, muted ? LV_SYMBOL_VOLUME_MAX : LV_SYMBOL_MUTE);
 
       if (ui->rxPanel) {
         setWidgetLabelText(ui->rxName, npHalfName(npSettings.volume, v, "Receiver"));
         setWidgetLabelText(ui->rxValue, value[0] ? value : "Volume");
-        lv_obj_set_style_text_color(ui->rxValue, v.muted && !off ? npMutedRed() : textPrimary(), 0);
+        lv_obj_set_style_text_color(ui->rxValue, muted ? npMutedRed() : textPrimary(), 0);
         npSetFill(ui->rxFill, ui->rxTrackWidth,
                   v.hasVolume && !off ? (uint32_t)(constrain(v.volume, 0.0f, 1.0f) * 1000.0f) : 0);
         npSetHidden(ui->rxKeys, off);
         npSetHidden(ui->rxPowerBtn, !canTurnOn);
         if (ui->rxMuteLabel) setWidgetLabelText(ui->rxMuteLabel,
-          v.muted && !v.guessed ? LV_SYMBOL_VOLUME_MAX " Unmute" : LV_SYMBOL_MUTE " Mute");
+          muted ? LV_SYMBOL_VOLUME_MAX " Unmute" : LV_SYMBOL_MUTE " Mute");
         npRebuildReceiverLists(ui);
         for (uint8_t i = 0; i < ui->rxSourceCount; i++) {
           npSetKeySelected(ui->rxSourceBtns[i], v.source[0] && strcasecmp(npInputLabel(i), v.source) == 0);
@@ -1993,18 +2140,29 @@ void refreshNowPlayingUi(NowPlayingUi *ui) {
   }
 }
 
+static void npShowReceiverPanelOn(WidgetInstance &instance, bool show);
+
 void npShowReceiverPanel(bool show) {
-  for (uint8_t i = 0; i < widgetExpandedInstanceCount; i++) {
-    WidgetInstance &instance = widgetExpandedInstances[i];
-    if (instance.kind != WIDGET_NOWPLAYING || !instance.nowPlayingUi) continue;
-    NowPlayingUi *ui = instance.nowPlayingUi;
-    if (!ui->rxPanel || !ui->mediaPanel) continue;
-    ui->rxShown = show;
-    npSetHidden(ui->rxPanel, !show);
-    npSetHidden(ui->mediaPanel, show);
-    if (show) npRequestRefresh(false, true);
-    refreshNowPlayingUi(ui);
+  // The open widget if there is one, else any full-size one on the page.
+  bool overlay = nowPlayingExpandedOpen();
+  for (uint8_t i = 0; overlay && i < widgetExpandedInstanceCount; i++) {
+    npShowReceiverPanelOn(widgetExpandedInstances[i], show);
   }
+  for (uint8_t i = 0; !overlay && i < widgetInstanceCount; i++) {
+    npShowReceiverPanelOn(widgetInstances[i], show);
+  }
+}
+
+static void npShowReceiverPanelOn(WidgetInstance &instance, bool show) {
+  if (instance.kind != WIDGET_NOWPLAYING || !instance.nowPlayingUi) return;
+  if (!instance.card || !lv_obj_is_valid(instance.card)) return;
+  NowPlayingUi *ui = instance.nowPlayingUi;
+  if (!ui->rxPanel || !ui->mediaPanel) return;
+  ui->rxShown = show;
+  npSetHidden(ui->rxPanel, !show);
+  npSetHidden(ui->mediaPanel, show);
+  if (show) npRequestRefresh(false, true);
+  refreshNowPlayingUi(ui);
 }
 
 /* ------------------------------------------------------------- pop-up */
@@ -2044,12 +2202,12 @@ void npHideVolumePopup() {
   npPopupUntilMs = 0;
 }
 
-bool nowPlayingExpandedOpen();
+bool nowPlayingFullOnScreen();
 
 void npShowVolumePopup(const char *action) {
   if (!npSettings.volumePopup || !npHalfActive(npSettings.volume)) return;
-  // The open widget already shows the level, larger.
-  if (nowPlayingExpandedOpen()) return;
+  // The open widget, or a full-size one on the page, already shows the level.
+  if (nowPlayingFullOnScreen()) return;
   strlcpy(npPopupAction, action ? action : "Volume", sizeof(npPopupAction));
   npPopupUntilMs = millis() + 2200UL;
   if (!npPopup || !lv_obj_is_valid(npPopup)) {
@@ -2079,6 +2237,17 @@ bool nowPlayingExpandedOpen() {
   if (!widgetExpandedOverlay || widgetExpandedClosing) return false;
   for (uint8_t i = 0; i < widgetExpandedInstanceCount; i++) {
     if (widgetExpandedInstances[i].kind == WIDGET_NOWPLAYING) return true;
+  }
+  return false;
+}
+
+bool nowPlayingFullOnScreen() {
+  if (nowPlayingExpandedOpen()) return true;
+  for (uint8_t i = 0; i < widgetInstanceCount; i++) {
+    const WidgetInstance &instance = widgetInstances[i];
+    if (instance.kind == WIDGET_NOWPLAYING && instance.nowPlayingUi && instance.card &&
+        lv_obj_is_valid(instance.card) && instance.nowPlayingUi->layout == NP_LAYOUT_FULL &&
+        instance.nowPlayingUi->hasVolume) return true;
   }
   return false;
 }
