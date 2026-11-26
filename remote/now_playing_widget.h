@@ -478,14 +478,14 @@ static bool npArtLoadFromCard(const char *path, const char *key) {
 static bool npArtDownload(const char *picture, const char *key, const char *path) {
   if (!ensureStationConnected(8000UL)) return false;
   String url = picture;
-  if (!url.startsWith("http://") && !url.startsWith("https://")) {
-    url = normaliseHomeAssistantUrl(haBaseUrl) + url;
-  }
+  String base = normaliseHomeAssistantUrl(haBaseUrl);
+  if (!url.startsWith("http://") && !url.startsWith("https://")) url = base + url;
   HTTPClient http;
   http.setConnectTimeout(4000);
   http.setTimeout(8000);
   if (!http.begin(url)) return false;
-  http.addHeader("Authorization", "Bearer " + haToken);
+  // The token goes to Home Assistant only, never to an outside image host.
+  if (url.startsWith(base + "/")) http.addHeader("Authorization", "Bearer " + haToken);
   int status = http.GET();
   if (status != 200) {
     Serial.printf("Now Playing: artwork HTTP %d\n", status);
