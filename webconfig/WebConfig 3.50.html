@@ -3356,6 +3356,20 @@
 .wgTile.wgContentPanel>*{position:relative;z-index:1}
 .widgetBackgroundChoice{width:min(250px,48%)}
 
+/* Now Playing settings */
+.npHalf{border:1px solid var(--line);border-radius:16px;padding:14px;margin:4px 0 14px;display:grid;gap:12px}
+.npHalf h3{margin:0;font-size:15px}
+.npHalfSource{font-size:13px;color:var(--muted);line-height:1.4}
+.npHalf details{border-top:1px solid var(--line);padding-top:10px}
+.npHalf summary{cursor:pointer;font-weight:800;font-size:13px}
+.npKeyGrid{display:grid;grid-template-columns:minmax(110px,auto) 1fr;gap:8px 12px;align-items:center;margin-top:10px}
+.npKeyGrid span{font-size:13px;color:var(--muted)}
+.npKeyGrid select,.npMqttGrid input{padding:8px 10px;font-size:14px;border-radius:10px}
+.npMqttGrid{display:grid;grid-template-columns:minmax(110px,auto) 1fr;gap:8px 12px;align-items:center;margin-top:10px}
+.npMqttGrid span{font-size:13px;color:var(--muted)}
+.npInputList{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;font-size:13px}
+.npInputList label{display:flex;gap:6px;align-items:center}
+
 /* Now Playing */
 .wgNowPlaying{display:flex;flex-direction:column;gap:calc(4px * var(--wgScale));padding:calc(7px * var(--wgScale)) calc(8px * var(--wgScale))!important}
 .wgNpMedia{display:flex;gap:calc(9px * var(--wgScale));min-width:0;flex:1 1 auto}
@@ -6102,22 +6116,13 @@
           <div>
             <div class="sectionTitle">Widget</div>
             <h2>Now Playing</h2>
-            <p>What is playing and how loud, from Home Assistant. Pick one player for the artwork, title and progress (an Apple TV, a Roku) and one for volume, input and sound mode (an AV receiver, a TV on ARC) &mdash; either can be left empty. Each half names its source. Tap it for transport keys, volume keys and a Receiver panel with the input and sound-mode pickers. Needs remote firmware with Now Playing support.</p>
+            <p>What is playing and how loud. Pick one of your devices for the artwork, title and progress (an Apple TV, a Roku) and one for volume, input and sound mode (an AV receiver, a TV on ARC) &mdash; either can be left empty. Status comes from the device's own connection: Home Assistant shows everything, Homebridge power, input and volume, MQTT whatever its topics carry, a Chromecast what the dock reports, and an IR device only what the remote remembers. Keys go to the same device's commands unless you choose otherwise. Tap the widget for transport keys, volume keys and a Receiver panel with the input and sound-mode pickers. Needs remote firmware with Now Playing support.</p>
             <div class="widgetUsage" id="widgetUsageNowPlaying">Not on any page yet</div>
           </div>
         </summary>
         <div class="widgetCardBody">
-          <datalist id="widgetNowPlayingEntities"></datalist>
-          <label>
-            <span class="fieldLabel">Now playing from</span>
-            <input class="textInput" id="widgetNowPlayingMedia" list="widgetNowPlayingEntities" maxlength="63" placeholder="media_player.den_apple_tv" autocomplete="off">
-            <div class="settingHint">The Home Assistant media_player whose app, title, artwork and position are shown. Leave empty for a volume-only widget.</div>
-          </label>
-          <label>
-            <span class="fieldLabel">Volume from</span>
-            <input class="textInput" id="widgetNowPlayingVolume" list="widgetNowPlayingEntities" maxlength="63" placeholder="media_player.den_denon" autocomplete="off">
-            <div class="settingHint">The media_player whose volume, mute, input and sound mode are shown and controlled &mdash; usually the AV receiver. Leave empty for media only.</div>
-          </label>
+          <div class="npHalf" id="widgetNowPlayingMediaHalf" data-np-half="media"></div>
+          <div class="npHalf" id="widgetNowPlayingVolumeHalf" data-np-half="volume"></div>
           <div class="settingRow">
             <div><div class="settingName">Allow input change</div><div class="settingHint">Turn this off to show the current input without letting anyone change it.</div></div>
             <label class="switch"><input type="checkbox" id="widgetNowPlayingAllowInput" checked><span></span></label>
@@ -6526,8 +6531,8 @@
       media:{background:"theme",source:"auto",deviceId:"",castName:"",viaDock:true,autoExpand:true,artwork:true},
       power:{background:"theme",range:"60m",colours:defaultPowerColours()},
       /* Must match npSettings in the remote's now_playing_widget.h. */
-      nowPlaying:{background:"theme",mediaEntity:"",volumeEntity:"",allowInput:true,allowSoundMode:true,
-                  volumeUnit:"db",dbOffset:-80,volumePopup:true,artwork:true}
+      nowPlaying:{background:"theme",media:defaultNowPlayingHalf(),volume:defaultNowPlayingHalf(),
+                  allowInput:true,allowSoundMode:true,volumeUnit:"db",dbOffset:-80,volumePopup:true,artwork:true}
     };
   }
 
@@ -6635,8 +6640,8 @@
     out.media.autoExpand=media.autoExpand!==false;
     out.media.artwork=media.artwork!==false;
     var np=raw.nowPlaying && typeof raw.nowPlaying==="object" ? raw.nowPlaying : {};
-    out.nowPlaying.mediaEntity=typeof np.mediaEntity==="string" ? np.mediaEntity.trim().slice(0,63) : "";
-    out.nowPlaying.volumeEntity=typeof np.volumeEntity==="string" ? np.volumeEntity.trim().slice(0,63) : "";
+    out.nowPlaying.media=normaliseNowPlayingHalf(np.media,np.mediaEntity);
+    out.nowPlaying.volume=normaliseNowPlayingHalf(np.volume,np.volumeEntity);
     out.nowPlaying.allowInput=np.allowInput!==false;
     out.nowPlaying.allowSoundMode=np.allowSoundMode!==false;
     out.nowPlaying.volumeUnit=np.volumeUnit==="percent" ? "percent" : "db";
@@ -6962,22 +6967,285 @@
     '</div>';
   }
 
+  /* ------------------------------------------------ Now Playing sources *
+     Each half of the widget is one of the user's devices. The device's own
+     connection decides where status comes from; its commands are what the
+     keys send unless another device is chosen. resolveNowPlayingHalf()
+     writes the result (source, entity, accessory, key command ids) into
+     the half, which is what the remote reads.
+   * ------------------------------------------------------------------ */
+  var NP_MQTT_FIELDS=[["state","State"],["title","Title"],["artist","Artist / subtitle"],["app","App"],
+    ["position","Position (s)"],["duration","Length (s)"],["volume","Volume"],["muted","Muted"],
+    ["source","Input"],["soundMode","Sound mode"],["picture","Artwork URL"],["sources","Input list"]];
+  var NP_KEYS=[["volumeUp","Volume up"],["volumeDown","Volume down"],["mute","Mute"],["powerOn","Power on"],
+    ["powerOff","Power off"],["playPause","Play / pause"],["next","Next / skip"],["previous","Previous / back"]];
+  var NP_KEY_PATTERNS={
+    volumeUp:[/\bvol(ume)?\s*(up|\+)|^vol\+|^volume\s*\+/i],
+    volumeDown:[/\bvol(ume)?\s*(down|-|\u2212)|^vol-/i],
+    mute:[/\bmute\b|mute\s*toggle/i],
+    powerOn:[/power\s*on\b|^on$|turn\s*on/i,/^power$|power\s*toggle|^power\b/i],
+    powerOff:[/power\s*off\b|^off$|turn\s*off|standby/i],
+    playPause:[/play\s*\/?\s*pause|play_pause/i,/^play$/i],
+    next:[/\bnext\b|skip\s*(fwd|forward|\+)?$|track\s*\+/i,/fast\s*forward|^ff$|forward/i],
+    previous:[/\bprev(ious)?\b|replay|track\s*-/i,/rewind|^rew$|back(ward)?\s*skip/i]
+  };
+  var NP_INPUT_PATTERN=/^(input|source|hdmi|av\s*\d|tv\b|tv\s*audio|cbl|sat|cable|bd\b|blu-?ray|dvd|game|aux|optical|coax|bluetooth|usb|tuner|fm|am\b|net|network|phono|cd\b|media\s*player|video|component|line\b|arc|earc|heos|airplay|spotify)/i;
+
+  function defaultNowPlayingHalf(){
+    return {device:"",label:"",name:"",keysDevice:"",keyChoice:{},inputChoice:"auto",
+            mqtt:{jsonTopic:"",fields:{},volumeScale:"unit"},
+            source:"none",entity:"",accessory:"",keys:{device:"",inputs:[]}};
+  }
+
+  function normaliseNowPlayingHalf(raw,legacyEntity){
+    var half=defaultNowPlayingHalf();
+    if(!raw || typeof raw!=="object"){
+      // Before source types, each half was a bare Home Assistant entity.
+      if(typeof legacyEntity==="string" && legacyEntity.trim()){
+        half.source="homeassistant";
+        half.entity=legacyEntity.trim().slice(0,63);
+      }
+      return half;
+    }
+    var text=function(v,n){return typeof v==="string" ? v.trim().slice(0,n) : "";};
+    half.device=text(raw.device,47);
+    half.label=text(raw.label,38);
+    half.name=text(raw.name,38);
+    half.keysDevice=text(raw.keysDevice,47);
+    half.source=["homeassistant","mqtt","homebridge","chromecast","none"].indexOf(raw.source)>=0 ? raw.source : "none";
+    half.entity=text(raw.entity,63);
+    half.accessory=text(raw.accessory,71);
+    var choice=raw.keyChoice && typeof raw.keyChoice==="object" ? raw.keyChoice : {};
+    NP_KEYS.forEach(function(key){ if(typeof choice[key[0]]==="string") half.keyChoice[key[0]]=choice[key[0]].slice(0,47); });
+    half.inputChoice=Array.isArray(raw.inputChoice) ? raw.inputChoice.filter(function(id){return typeof id==="string";}).slice(0,24) : "auto";
+    var mqtt=raw.mqtt && typeof raw.mqtt==="object" ? raw.mqtt : {};
+    half.mqtt.jsonTopic=text(mqtt.jsonTopic,95);
+    var fields=mqtt.fields && typeof mqtt.fields==="object" ? mqtt.fields : {};
+    NP_MQTT_FIELDS.forEach(function(field){ var v=text(fields[field[0]],79); if(v) half.mqtt.fields[field[0]]=v; });
+    half.mqtt.volumeScale=["unit","percent","db"].indexOf(mqtt.volumeScale)>=0 ? mqtt.volumeScale : "unit";
+    var keys=raw.keys && typeof raw.keys==="object" ? raw.keys : {};
+    half.keys={device:text(keys.device,47),inputs:Array.isArray(keys.inputs) ? keys.inputs.slice(0,24) : []};
+    NP_KEYS.forEach(function(key){ if(typeof keys[key[0]]==="string") half.keys[key[0]]=keys[key[0]]; });
+    return half;
+  }
+
+  function nowPlayingDevice(id){
+    if(!id) return null;
+    return (Array.isArray(addedDevices)?addedDevices:[]).find(function(d){return d && d.id===id;}) || null;
+  }
+
+  /* Where a device's status can come from, for one half. */
+  function nowPlayingSourceFor(dev,which){
+    if(!dev) return {source:"none",entity:"",accessory:""};
+    var transport=inferredTransport(dev);
+    if(transport==="homeassistant"){
+      var entity=dev.haEntityId || "";
+      if(!entity) (dev.commands||[]).some(function(c){ if(c.homeAssistant && c.homeAssistant.entityId){ entity=c.homeAssistant.entityId; return true; } return false; });
+      return {source:"homeassistant",entity:entity,accessory:""};
+    }
+    if(transport==="homebridge") return {source:"homebridge",entity:"",accessory:dev.homebridgeAccessoryId || ""};
+    if(transport==="mqtt") return {source:"mqtt",entity:"",accessory:""};
+    // A Bluetooth player is how this remote drives a Chromecast / Google TV,
+    // whose status the dock already reads for the Media widget.
+    if(transport==="bluetooth" && which==="media") return {source:"chromecast",entity:"",accessory:""};
+    return {source:"none",entity:"",accessory:""};
+  }
+
+  function nowPlayingSourceText(source){
+    return {
+      homeassistant:"Home Assistant: title, artwork, position, volume, mute, input and sound mode.",
+      homebridge:"Homebridge: power, play state, input, mute and volume. HomeKit carries no titles or artwork.",
+      mqtt:"MQTT: whatever the topics below carry.",
+      chromecast:"Chromecast: title, artwork and position from the dock, as the Media widget shows them. Needs a paired dock.",
+      none:"No status comes back from this device (IR). The widget shows its keys, the last input picked here and, with power tracking, whether it is on."
+    }[source] || "";
+  }
+
+  /* The device's command that best matches a key, by name. */
+  function nowPlayingGuessKey(dev,key){
+    var commands=dev && Array.isArray(dev.commands) ? dev.commands : [];
+    var patterns=NP_KEY_PATTERNS[key] || [];
+    for(var p=0;p<patterns.length;p++){
+      var hit=commands.find(function(c){return c && c.id && patterns[p].test(String(c.name||c.label||""));});
+      if(hit) return hit.id;
+    }
+    return "";
+  }
+
+  function nowPlayingGuessInputs(dev,taken){
+    return (dev && Array.isArray(dev.commands) ? dev.commands : []).filter(function(c){
+      return c && c.id && taken.indexOf(c.id)<0 && NP_INPUT_PATTERN.test(String(c.name||c.label||"").trim());
+    }).map(function(c){return c.id;}).slice(0,24);
+  }
+
+  /* Writes what the remote reads into the half. */
+  function resolveNowPlayingHalf(half,which){
+    var dev=nowPlayingDevice(half.device);
+    if(dev){
+      var found=nowPlayingSourceFor(dev,which);
+      half.source=found.source;
+      half.entity=found.entity;
+      half.accessory=found.accessory;
+    }else if(half.device){
+      half.device="";   // deleted since
+      half.source="none";
+    }
+    var keysDev=nowPlayingDevice(half.keysDevice) || dev;
+    // Home Assistant and Homebridge can do every key themselves, so their own
+    // device's commands are only used where the user picks them.
+    var sourceKeys=keysDev===dev && (half.source==="homeassistant" || half.source==="homebridge");
+    var keys={device:keysDev ? keysDev.id : "",inputs:[]};
+    var taken=[];
+    NP_KEYS.forEach(function(key){
+      var choice=half.keyChoice[key[0]];
+      var id=choice===undefined || choice==="auto" ? (sourceKeys ? "" : nowPlayingGuessKey(keysDev,key[0])) : choice;
+      if(id && keysDev && !(keysDev.commands||[]).some(function(c){return c.id===id;})) id="";
+      keys[key[0]]=id;
+      if(id) taken.push(id);
+    });
+    if(which==="volume" && keysDev){
+      keys.inputs=Array.isArray(half.inputChoice) ? half.inputChoice.filter(function(id){
+        return (keysDev.commands||[]).some(function(c){return c.id===id;});
+      }) : (sourceKeys ? [] : nowPlayingGuessInputs(keysDev,taken));
+    }
+    if(!keys.inputs.length && NP_KEYS.every(function(key){return !keys[key[0]];})) keys.device=sourceKeys ? "" : keys.device;
+    half.keys=keys;
+    // The name the remote shows: the user's, else the device's.
+    half.name=(half.label || (dev ? dev.name : "")).slice(0,38);
+    return half;
+  }
+
+  function resolveNowPlayingSettings(){
+    if(!widgetSettings || !widgetSettings.nowPlaying) return;
+    resolveNowPlayingHalf(widgetSettings.nowPlaying.media,"media");
+    resolveNowPlayingHalf(widgetSettings.nowPlaying.volume,"volume");
+  }
+
+  function nowPlayingHalfActive(half){
+    return !!(half && (half.device || half.entity || half.accessory || half.source==="mqtt"));
+  }
+
+  function renderNowPlayingHalf(which){
+    var box=document.getElementById(which==="media" ? "widgetNowPlayingMediaHalf" : "widgetNowPlayingVolumeHalf");
+    if(!box || box.contains(document.activeElement)) return;
+    var half=widgetSettings.nowPlaying[which];
+    resolveNowPlayingHalf(half,which);
+    var devices=(Array.isArray(addedDevices)?addedDevices:[]);
+    var dev=nowPlayingDevice(half.device);
+    var keysDev=nowPlayingDevice(half.keysDevice) || dev;
+    var esc=escapeWidgetText;
+    var transportName=function(d){
+      var t=inferredTransport(d);
+      return {homeassistant:"Home Assistant",homebridge:"Homebridge",mqtt:"MQTT",bluetooth:"Bluetooth",ir:"IR"}[t] || t;
+    };
+    var deviceOptions=function(selected,emptyLabel){
+      return '<option value="">'+esc(emptyLabel)+'</option>'+devices.map(function(d){
+        return '<option value="'+esc(d.id)+'"'+(d.id===selected?' selected':'')+'>'+esc(d.name)+' \u2014 '+esc(transportName(d))+'</option>';
+      }).join("");
+    };
+    var html='<h3>'+(which==="media" ? "Now playing from" : "Volume from")+'</h3>'+
+      '<select class="textInput" data-np="device">'+deviceOptions(half.device,"Nothing")+'</select>';
+    if(!dev && half.entity) html+='<div class="npHalfSource">Home Assistant entity '+esc(half.entity)+' (from an earlier setup). Pick its device to manage keys here.</div>';
+    if(dev) html+='<div class="npHalfSource">'+esc(nowPlayingSourceText(half.source))+'</div>';
+    if(half.source==="mqtt"){
+      html+='<div><span class="fieldLabel">MQTT state</span>'+
+        '<input class="textInput" data-np="jsonTopic" maxlength="95" placeholder="JSON state topic, e.g. home/den/player/state" value="'+esc(half.mqtt.jsonTopic)+'">'+
+        '<div class="settingHint">With a JSON topic, each field below is a key in its payload (dots for nesting: player.volume). Without one, each field is a topic of its own. Through a dock, per-field values are cut to 47 characters and JSON needs the remote\'s own connection.</div>'+
+        '<div class="npMqttGrid">'+NP_MQTT_FIELDS.map(function(field){
+          return '<span>'+esc(field[1])+'</span><input class="textInput" data-np-field="'+field[0]+'" maxlength="79" value="'+esc(half.mqtt.fields[field[0]]||"")+'">';
+        }).join("")+
+        '<span>Volume scale</span><select class="textInput" data-np="volumeScale">'+
+          [["unit","0 to 1"],["percent","0 to 100"],["db","dB"]].map(function(o){return '<option value="'+o[0]+'"'+(half.mqtt.volumeScale===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join("")+
+        '</select></div></div>';
+    }
+    if(dev || half.entity){
+      html+='<label><span class="fieldLabel">Name shown</span><input class="textInput" data-np="label" maxlength="38" placeholder="'+esc(dev ? dev.name : "")+'" value="'+esc(half.label)+'"></label>';
+      var keyOptions=function(selected,auto){
+        var cmds=keysDev && Array.isArray(keysDev.commands) ? keysDev.commands : [];
+        return '<option value="auto"'+(selected===undefined||selected==="auto"?' selected':'')+'>Automatic'+(auto ? ' ('+esc((cmds.find(function(c){return c.id===auto;})||{}).name||"")+')' : '')+'</option>'+
+          '<option value=""'+(selected===""?' selected':'')+'>None</option>'+
+          cmds.map(function(c){return '<option value="'+esc(c.id)+'"'+(c.id===selected?' selected':'')+'>'+esc(c.name||c.label||c.id)+'</option>';}).join("");
+      };
+      var sourceKeys=keysDev===dev && (half.source==="homeassistant" || half.source==="homebridge");
+      html+='<details'+(half.keysDevice || Object.keys(half.keyChoice).length ? ' open' : '')+'><summary>Keys</summary>'+
+        '<label style="display:block;margin-top:10px"><span class="fieldLabel">Keys send to</span><select class="textInput" data-np="keysDevice">'+deviceOptions(half.keysDevice,"The same device")+'</select></label>'+
+        '<div class="settingHint">'+(sourceKeys
+          ? "Automatic uses "+(half.source==="homeassistant" ? "Home Assistant's own media_player services" : "Homebridge's TV characteristics")+"; pick a command to send that instead."
+          : "Automatic picks the device's command with the matching name; check what it found.")+'</div>'+
+        '<div class="npKeyGrid">'+NP_KEYS.filter(function(key){
+          return which==="media" ? ["playPause","next","previous","powerOn","powerOff"].indexOf(key[0])>=0
+                                 : ["volumeUp","volumeDown","mute","powerOn","powerOff"].indexOf(key[0])>=0;
+        }).map(function(key){
+          return '<span>'+esc(key[1])+'</span><select class="textInput" data-np-key="'+key[0]+'">'+keyOptions(half.keyChoice[key[0]],half.keys[key[0]])+'</select>';
+        }).join("")+'</div>';
+      if(which==="volume" && keysDev && !sourceKeys){
+        var inputs=half.keys.inputs || [];
+        html+='<div style="margin-top:12px"><span class="fieldLabel">Inputs on the Receiver panel</span>'+
+          '<div class="npInputList">'+(keysDev.commands||[]).filter(function(c){return c && c.id && NP_KEYS.every(function(key){return half.keys[key[0]]!==c.id;});}).map(function(c){
+            return '<label><input type="checkbox" data-np-input="'+esc(c.id)+'"'+(inputs.indexOf(c.id)>=0?' checked':'')+'>'+esc(c.name||c.label||c.id)+'</label>';
+          }).join("")+'</div>'+
+          '<div class="settingHint">'+(Array.isArray(half.inputChoice) ? 'Your choice. <a href="#" data-np="inputsAuto">Pick automatically again</a>' : 'Picked automatically from the command names.')+'</div></div>';
+      }
+      html+='</details>';
+    }
+    box.innerHTML=html;
+  }
+
+  function bindNowPlayingHalf(which){
+    var box=document.getElementById(which==="media" ? "widgetNowPlayingMediaHalf" : "widgetNowPlayingVolumeHalf");
+    if(!box) return;
+    var changed=function(){ resolveNowPlayingHalf(widgetSettings.nowPlaying[which],which); widgetSettingsChanged(); };
+    box.addEventListener("change",function(e){
+      var half=widgetSettings.nowPlaying[which];
+      var el=e.target;
+      var role=el.getAttribute("data-np");
+      if(role==="device"){ half.device=el.value; half.keyChoice={}; half.inputChoice="auto"; half.keysDevice=""; half.entity=""; half.accessory=""; }
+      else if(role==="keysDevice"){ half.keysDevice=el.value; half.keyChoice={}; half.inputChoice="auto"; }
+      else if(role==="label") half.label=el.value.trim().slice(0,38);
+      else if(role==="jsonTopic") half.mqtt.jsonTopic=el.value.trim().slice(0,95);
+      else if(role==="volumeScale") half.mqtt.volumeScale=el.value;
+      else if(el.hasAttribute("data-np-field")){
+        var key=el.getAttribute("data-np-field"), value=el.value.trim().slice(0,79);
+        if(value) half.mqtt.fields[key]=value; else delete half.mqtt.fields[key];
+      }else if(el.hasAttribute("data-np-key")){
+        var k=el.getAttribute("data-np-key");
+        if(el.value==="auto") delete half.keyChoice[k]; else half.keyChoice[k]=el.value;
+      }else if(el.hasAttribute("data-np-input")){
+        var ids=[];
+        box.querySelectorAll("[data-np-input]").forEach(function(input){ if(input.checked) ids.push(input.getAttribute("data-np-input")); });
+        half.inputChoice=ids;
+      }else return;
+      // Let the half redraw once focus leaves it.
+      if(el.tagName==="SELECT" || el.type==="checkbox") el.blur();
+      changed();
+    },false);
+    box.addEventListener("click",function(e){
+      if(e.target && e.target.getAttribute("data-np")==="inputsAuto"){
+        e.preventDefault();
+        widgetSettings.nowPlaying[which].inputChoice="auto";
+        changed();
+      }
+    },false);
+  }
+
   /* A sample face: the remote fills in the real player's names and values. */
   function nowPlayingVolumeSample(){
     var np=widgetSettings.nowPlaying;
     return np.volumeUnit==="percent" ? "48%" : Math.round(0.48*100+Number(np.dbOffset))+" dB";
   }
-  function nowPlayingShortName(entity,fallback){
-    if(!entity) return fallback;
-    var device=(Array.isArray(addedDevices)?addedDevices:[]).find(function(d){return d && d.haEntityId===entity;});
+  function nowPlayingShortName(half,fallback){
+    if(!half) return fallback;
+    if(half.label) return half.label;
+    var device=nowPlayingDevice(half.device);
     if(device && device.name) return device.name;
-    return entity.replace(/^media_player\./,"").replace(/_/g," ");
+    if(half.entity) return half.entity.replace(/^media_player\./,"").replace(/_/g," ");
+    return fallback;
   }
   function nowPlayingTileMarkup(tileClass,style,data){
     var np=widgetSettings.nowPlaying;
-    var hasMedia=!!np.mediaEntity, hasVolume=!!np.volumeEntity;
-    var mediaName=escapeWidgetText(nowPlayingShortName(np.mediaEntity,"Media player"));
-    var volumeName=escapeWidgetText(nowPlayingShortName(np.volumeEntity,"Receiver"));
+    var hasMedia=nowPlayingHalfActive(np.media), hasVolume=nowPlayingHalfActive(np.volume);
+    var mediaName=escapeWidgetText(nowPlayingShortName(np.media,"Media player"));
+    var volumeName=escapeWidgetText(nowPlayingShortName(np.volume,"Receiver"));
     var slim=!!(data && data.slim);
     if(!hasMedia && !hasVolume){
       return '<div class="wgTile wgNowPlaying wgNpEmpty'+tileClass+'"'+style+'><div class="wgTitle">Now Playing</div>'+
@@ -7281,24 +7549,8 @@
     if(mediaBackground) mediaBackground.value=widgetSettings.media.background;
 
     var np=widgetSettings.nowPlaying;
-    var npList=document.getElementById("widgetNowPlayingEntities");
-    if(npList){
-      npList.innerHTML="";
-      var seenEntities={};
-      (Array.isArray(addedDevices)?addedDevices:[]).forEach(function(device){
-        var entity=device && typeof device.haEntityId==="string" ? device.haEntityId : "";
-        if(entity.indexOf("media_player.")!==0 || seenEntities[entity]) return;
-        seenEntities[entity]=true;
-        var option=document.createElement("option");
-        option.value=entity;
-        option.textContent=device.name || entity;
-        npList.appendChild(option);
-      });
-    }
-    var npMedia=document.getElementById("widgetNowPlayingMedia");
-    if(npMedia && document.activeElement!==npMedia) npMedia.value=np.mediaEntity;
-    var npVolume=document.getElementById("widgetNowPlayingVolume");
-    if(npVolume && document.activeElement!==npVolume) npVolume.value=np.volumeEntity;
+    renderNowPlayingHalf("media");
+    renderNowPlayingHalf("volume");
     var npInput=document.getElementById("widgetNowPlayingAllowInput");
     if(npInput) npInput.checked=np.allowInput;
     var npSound=document.getElementById("widgetNowPlayingAllowSoundMode");
@@ -7537,16 +7789,8 @@
     },false);
     bindSwitch("widgetMediaAutoExpand",function(v){ widgetSettings.media.autoExpand=v; });
     bindSwitch("widgetMediaArtwork",function(v){ widgetSettings.media.artwork=v; });
-    function bindNowPlayingEntity(id,key){
-      var el=document.getElementById(id);
-      if(el) el.addEventListener("change",function(){
-        widgetSettings.nowPlaying[key]=String(el.value || "").trim().slice(0,63);
-        el.value=widgetSettings.nowPlaying[key];
-        widgetSettingsChanged();
-      },false);
-    }
-    bindNowPlayingEntity("widgetNowPlayingMedia","mediaEntity");
-    bindNowPlayingEntity("widgetNowPlayingVolume","volumeEntity");
+    bindNowPlayingHalf("media");
+    bindNowPlayingHalf("volume");
     bindSwitch("widgetNowPlayingAllowInput",function(v){ widgetSettings.nowPlaying.allowInput=v; });
     bindSwitch("widgetNowPlayingAllowSoundMode",function(v){ widgetSettings.nowPlaying.allowSoundMode=v; });
     bindSelect("widgetNowPlayingUnit",function(v){ widgetSettings.nowPlaying.volumeUnit=v==="percent" ? "percent" : "db"; });
@@ -9466,6 +9710,7 @@
 
   function buildRuntimePayload(){
     pruneOrphanDeviceReferences();
+    resolveNowPlayingSettings();
     (Array.isArray(addedDevices)?addedDevices:[]).forEach(ensureSmartPhysicalBindings);
     var activitiesPage=(Array.isArray(pages)?pages:[]).find(function(page){return page && page.pageType==="activities";});
     var themeRecords=(Array.isArray(defaultThemes)?defaultThemes:[]).concat(Array.isArray(customThemes)?customThemes:[]);

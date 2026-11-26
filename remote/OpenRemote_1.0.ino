@@ -18479,7 +18479,8 @@ struct LiveStateEntry {
   char value[48];
   bool valid;
 };
-static const uint8_t MAX_LIVE_STATES = 16;
+/* Raised from 16 to leave room for a Now Playing widget's MQTT topics. */
+static const uint8_t MAX_LIVE_STATES = 32;
 LiveStateEntry liveStates[MAX_LIVE_STATES];
 uint8_t liveStateCount = 0;
 bool liveStateDirty = false;
@@ -18527,9 +18528,16 @@ void setLiveState(const char *topic, const char *value) {
   liveStateDirty = true;
 }
 
-/* Walks the model for every state topic a command asks to watch. */
+/* now_playing_widget.h, further down with the other widgets. */
+uint8_t nowPlayingMqttTopics(const char *topics[], uint8_t maximum);
+void nowPlayingMqttMessage(const char *topic, const uint8_t *payload, unsigned int length);
+
+/* Walks the model for every state topic a command asks to watch, then the
+   Now Playing widget's. */
 uint8_t collectMqttStateTopics(const char *topics[], uint8_t maximum) {
   uint8_t count = 0;
+  const char *widgetTopics[MAX_LIVE_STATES];
+  uint8_t widgetCount = nowPlayingMqttTopics(widgetTopics, MAX_LIVE_STATES);
   for (uint8_t d = 0; d < DEVICE_COUNT && count < maximum; d++) {
     for (uint16_t c = 0; c < devices[d].commandCount && count < maximum; c++) {
       const DeviceCommand &command = devices[d].commands[c];
@@ -18542,10 +18550,19 @@ uint8_t collectMqttStateTopics(const char *topics[], uint8_t maximum) {
       if (!seen) topics[count++] = command.mqttStateTopic;
     }
   }
+  for (uint8_t w = 0; w < widgetCount && count < maximum; w++) {
+    bool seen = false;
+    for (uint8_t i = 0; i < count; i++) {
+      if (strcmp(topics[i], widgetTopics[w]) == 0) { seen = true; break; }
+    }
+    if (!seen) topics[count++] = widgetTopics[w];
+  }
   return count;
 }
 
 void mqttMessageArrived(char *topic, byte *payload, unsigned int length) {
+  // Whole, before the tiles' short copy, so a JSON state topic survives.
+  nowPlayingMqttMessage(topic, payload, length);
   char value[48];
   unsigned int copy = length < sizeof(value) - 1 ? length : sizeof(value) - 1;
   memcpy(value, payload, copy);
@@ -18589,7 +18606,8 @@ bool mqttConnectDirect(String &error) {
     }
   }
 
-  mqttClient.setBufferSize(512);
+  // Large enough for a Now Playing widget's JSON state topic.
+  mqttClient.setBufferSize(2048);
   mqttClient.setServer(mqttHost.c_str(), mqttPort);
   mqttClient.setCallback(mqttMessageArrived);
   String clientId = mqttEffectiveClientId();
@@ -18608,6 +18626,15 @@ bool mqttConnectDirect(String &error) {
   for (uint8_t i = 0; i < count; i++) mqttClient.subscribe(topics[i]);
   if (count) Serial.printf("MQTT: subscribed to %u state topic(s)\n", count);
   return true;
+}
+
+/* The Now Playing widget's topics changed: subscribe again, on the dock or here. */
+void nowPlayingMqttTopicsChanged() {
+  mqttSubscriptionsPushed = false;
+  if (mqttClient.connected()) {
+    mqttClient.disconnect();   // serviceMqtt() reconnects and subscribes afresh
+    mqttNextConnectMs = 0;
+  }
 }
 
 /* Hands the dock the broker details, as sendHomebridgeConfigToDock() does
@@ -19122,17 +19149,19 @@ bool holdHomeAssistantRadio(uint32_t now) {
   screen it is read directly in either case.
 */
 void serviceHomeAssistantLive(uint32_t now) {
-  if (!homeAssistantConfigured()) {
+  // A Now Playing widget may read Homebridge with no Home Assistant at all.
+  bool haReady = homeAssistantConfigured();
+  bool richWanted = nowPlayingPollWanted();
+  if (!haReady && !richWanted) {
     releaseHomeAssistantRadio();
     return;
   }
 
-  bool viaDock = homeAssistantShouldUseDock();
+  bool viaDock = haReady && homeAssistantShouldUseDock();
   if (viaDock && !haWatchListPushed && dockConnected()) sendHomeAssistantWatchListToDock();
 
   const char *entities[MAX_LIVE_STATES];
-  uint8_t count = viaDock ? 0 : collectHomeAssistantEntities(entities, MAX_LIVE_STATES);
-  bool richWanted = nowPlayingPollWanted();
+  uint8_t count = (haReady && !viaDock) ? collectHomeAssistantEntities(entities, MAX_LIVE_STATES) : 0;
   if ((!count && !richWanted) || displaySleeping) {
     releaseHomeAssistantRadio();
     return;
@@ -19179,7 +19208,6 @@ bool transmitHomeAssistantCommand(const DeviceCommand &command) {
   bool sent = viaDock ? callHomeAssistantViaDock(command)
                       : callHomeAssistantDirect(command);
   if (sent && viaDock) flashEspNowCommandFeedback();
-  nowPlayingNoteCommand(command, sent);
   return sent;
 }
 
@@ -19580,7 +19608,17 @@ bool transmitLocalIrCommand(const DeviceCommand &command) {
   return true;
 }
 
+bool transmitIrCommandUnnoted(const DeviceCommand &command);
+
+/* Every command, of every kind, goes through here - so the Now Playing
+   widget sees each one that reaches its player or receiver. */
 bool transmitIrCommand(const DeviceCommand &command) {
+  bool sent = transmitIrCommandUnnoted(command);
+  nowPlayingNoteCommand(command, sent);
+  return sent;
+}
+
+bool transmitIrCommandUnnoted(const DeviceCommand &command) {
   if (command.kind == DeviceCommand::HOMEBRIDGE) {
     return transmitHomebridgeCommand(command);
   }
@@ -42522,7 +42560,8 @@ bool mediaWidgetOnScreen() {
   for (uint8_t i = 0; i < widgetInstanceCount; i++) {
     if (widgetInstances[i].kind == WIDGET_MEDIA) return true;
   }
-  return false;
+  // A Now Playing widget reading a Chromecast uses the same feed.
+  return nowPlayingWantsCast();
 }
 
 void autoExpandPlayingMedia() {
@@ -42800,6 +42839,10 @@ void serviceMediaTarget(uint32_t now) {
   // only one guaranteed to match what the Chromecast actually advertises.
   if (widgetSettings.mediaCastName[0]) {
     strlcpy(wanted, widgetSettings.mediaCastName, sizeof(wanted));
+  } else if (npSettings.media.type == NP_SRC_CAST && npSettings.media.keysDevice[0] &&
+             findRuntimeDevice(npSettings.media.keysDevice)) {
+    // The device a Now Playing widget is pinned to.
+    strlcpy(wanted, findRuntimeDevice(npSettings.media.keysDevice)->name, sizeof(wanted));
   } else if (widgetSettings.mediaUseNamedDevice && widgetSettings.mediaDeviceId[0]) {
     Device *pinned = findRuntimeDevice(widgetSettings.mediaDeviceId);
     if (pinned) strlcpy(wanted, pinned->name, sizeof(wanted));
