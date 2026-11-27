@@ -2077,6 +2077,8 @@ static void npMediaLines(const NpEntityState &m, char *title, size_t titleSize, 
 
 void refreshNowPlayingUi(NowPlayingUi *ui) {
   if (!ui) return;
+  // Events and polls recolour these labels long after the page was drawn.
+  TextThemeScope textScope(textThemeFor(ui->mediaPanel ? ui->mediaPanel : ui->volValue));
   char text[128];
   const bool full = ui->layout == NP_LAYOUT_FULL;
 

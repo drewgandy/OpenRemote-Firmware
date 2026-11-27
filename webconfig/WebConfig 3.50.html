@@ -3618,6 +3618,7 @@
 .themeLivePreview{position:relative;width:240px;max-width:100%;aspect-ratio:3/4;border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.10);background:#160703 center top/100% auto no-repeat;margin:auto}
 .themePreviewTitle{position:absolute;left:10px;top:9px;font-size:17px}.themePreviewPill{position:absolute;right:9px;top:10px;font-size:8px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.35);padding:4px 7px;border-radius:999px}
 .themePreviewButtons{position:absolute;left:10px;right:10px;top:150px;display:grid;gap:7px}.themePreviewButtons span{height:35px;border-radius:12px;background:rgba(70,34,17,.25);border:1px solid rgba(255,255,255,.15)}
+.themePreviewSample{position:absolute;left:22px;top:150px;height:35px;display:grid;align-content:center;line-height:1.15;pointer-events:none}.themePreviewSample b{font-size:13px}.themePreviewSample small{font-size:10px}
 .themePreviewDots{position:absolute;bottom:8px;left:0;right:0;text-align:center;color:rgba(255,255,255,.65);letter-spacing:4px}
 @media(max-width:760px){.themeCreatorLayout{grid-template-columns:1fr}.themeCropToolbar{grid-template-columns:1fr}}
 
@@ -3780,6 +3781,12 @@
   background:transparent;
 }
 .glassColourControl.disabled{opacity:.38;pointer-events:none}
+.themeTextColourControl input[type=color]{width:100%;height:42px;border:1px solid var(--line2);border-radius:13px;background:transparent}
+.themeTextColourControl.disabled{opacity:.38;pointer-events:none}
+.screenUi.theme-custom.custom-text .pageTitleCentre,
+.screenUi.theme-custom.custom-text .pageTitleCentre::after,
+.screenUi.theme-custom.custom-text .lcdGridLabel{color:var(--custom-text-colour)!important}
+.screenUi.theme-custom.custom-subtext .slideActivityHint{color:var(--custom-subtext-colour)!important;opacity:1!important}
 
 /* Custom themes retain the existing 25% glass intensity, but the hue is user-selectable. */
 .screenUi.theme-custom .lcdGridItem,
@@ -6426,6 +6433,30 @@
               <div class="glassControlBox">
                 <div class="settingRow">
                   <div>
+                    <div class="settingName">Custom main text</div>
+                    <div class="settingHint">Names, titles and values on pages using this theme. Off: white. Settings screens and pop-ups keep their own colours.</div>
+                  </div>
+                  <label class="switch"><input type="checkbox" id="themeTextColourEnabled"><span></span></label>
+                </div>
+                <label class="themeControlLabel themeTextColourControl" id="themeTextColourControl">
+                  <span>Main text colour</span>
+                  <input id="themeTextColour" type="color" value="#ffffff">
+                </label>
+                <div class="settingRow">
+                  <div>
+                    <div class="settingName">Custom subtext</div>
+                    <div class="settingHint">Captions such as &ldquo;Slide to activate&rdquo; and widget detail lines. Off: light grey-blue.</div>
+                  </div>
+                  <label class="switch"><input type="checkbox" id="themeSubTextColourEnabled"><span></span></label>
+                </div>
+                <label class="themeControlLabel themeTextColourControl" id="themeSubTextColourControl">
+                  <span>Subtext colour</span>
+                  <input id="themeSubTextColour" type="color" value="#becade">
+                </label>
+              </div>
+              <div class="glassControlBox">
+                <div class="settingRow">
+                  <div>
                     <div class="settingName">Glass</div>
                     <div class="settingHint">Apply a coloured transparent glass tint to buttons and activity sliders.</div>
                   </div>
@@ -6446,6 +6477,7 @@
                 <div class="themePreviewTitle">Activities⌄</div>
                 <div class="themePreviewPill">1:42 pm ▱</div>
                 <div class="themePreviewButtons"><span></span><span></span><span></span></div>
+                <div class="themePreviewSample"><b>Watch TV</b><small>Slide to activate</small></div>
                 <div class="themePreviewDots">• •</div>
               </div>
             </div>
@@ -9909,6 +9941,7 @@
           ambientColours:theme.ambientColours,split:theme.split,mode:theme.mode,
           glassEnabled:theme.glassEnabled,glassColour:theme.glassColour,
           glassTransparency:theme.glassTransparency,builtIn:theme.builtIn===true,
+          textColour:theme.textColour || "",subTextColour:theme.subTextColour || "",
           library:theme.library==="default" ? "default" : "custom",
           runtimePath:themeRuntimePath(theme.id),
           previewPath:theme.previewPath || ("/themes/"+(theme.library==="default"?"Default":"Custom")+"/"+safeThemeFileId(theme.id)+".png"),
@@ -21806,6 +21839,7 @@
           span.style.borderColor=glassEnabled ? "rgba(255,255,255,.15)" : "transparent";
         });
       }
+      updateThemeTextPreview(preview);
       var glassOn=!!(document.getElementById("themeGlassEnabled") && document.getElementById("themeGlassEnabled").checked);
       var glassControl=document.getElementById("glassColourControl");
       var transparencyControl=document.getElementById("glassTransparencyControl");
@@ -21842,6 +21876,39 @@
     if(stage) stage.classList.toggle("themeCreatorLocked",!!locked);
   }
 
+  /* A theme's text colours are "" until switched on. */
+  var THEME_TEXT_DEFAULTS={themeTextColour:"#ffffff",themeSubTextColour:"#becade"};
+  function setThemeTextControls(text,subText){
+    [["themeTextColour",text],["themeSubTextColour",subText]].forEach(function(pair){
+      var input=document.getElementById(pair[0]);
+      var toggle=document.getElementById(pair[0]+"Enabled");
+      var valid=/^#[0-9a-f]{6}$/i.test(pair[1] || "");
+      if(toggle) toggle.checked=valid;
+      if(input) input.value=valid ? pair[1] : THEME_TEXT_DEFAULTS[pair[0]];
+    });
+  }
+  function themeTextControlValue(id){
+    var input=document.getElementById(id);
+    var toggle=document.getElementById(id+"Enabled");
+    return (input && toggle && toggle.checked) ? input.value : "";
+  }
+  function updateThemeTextPreview(preview){
+    var text=themeTextControlValue("themeTextColour");
+    ["themeTextColour","themeSubTextColour"].forEach(function(id){
+      var control=document.getElementById(id+"Control");
+      if(control) control.classList.toggle("disabled",!themeTextControlValue(id));
+    });
+    if(!preview) return;
+    var title=preview.querySelector(".themePreviewTitle");
+    if(title) title.style.color=text || "";
+    var sample=preview.querySelector(".themePreviewSample");
+    if(sample){
+      sample.style.top=(parseInt((preview.querySelector(".themePreviewButtons")||{style:{}}).style.top,10) || 150)+"px";
+      sample.querySelector("b").style.color=text || "#ffffff";
+      sample.querySelector("small").style.color=themeTextControlValue("themeSubTextColour") || "#becade";
+    }
+  }
+
   function openThemeCreator(themeId){
     editingThemeId=themeId || null;
     themeCreatorImage=null;
@@ -21867,6 +21934,7 @@
       document.getElementById("themeGlassEnabled").checked=existing.glassEnabled!==false;
       document.getElementById("themeGlassColour").value=existing.glassColour || "#4d2512";
       document.getElementById("themeGlassTransparency").value=typeof existing.glassTransparency==="number" ? existing.glassTransparency : 25;
+      setThemeTextControls(existing.textColour,existing.subTextColour);
       document.getElementById("themeCropSize").value=existing.cropSize || "240x320";
       setThemeCreatorMode(existing.mode || "combined");
       setThemeCreatorLibrary(existing.builtIn ? "default" : (existing.library || "custom"));
@@ -21893,6 +21961,7 @@
       document.getElementById("themeGlassEnabled").checked=true;
       document.getElementById("themeGlassColour").value="#4d2512";
       document.getElementById("themeGlassTransparency").value=25;
+      setThemeTextControls("","");
       document.getElementById("themeCropSize").value="240x320";
       document.getElementById("themeZoom").value=100;
       setThemeCreatorMode("combined");
@@ -21952,6 +22021,8 @@
       glassEnabled:document.getElementById("themeGlassEnabled").checked,
       glassColour:document.getElementById("themeGlassColour").value,
       glassTransparency:Number(document.getElementById("themeGlassTransparency").value),
+      textColour:themeTextControlValue("themeTextColour"),
+      subTextColour:themeTextControlValue("themeSubTextColour"),
       library:existing && existing.builtIn ? "default" : themeCreatorLibrary,
       builtIn:!!(existing && existing.builtIn),
       assetSyncPending:true
@@ -22002,7 +22073,8 @@
       el.addEventListener("change",drawThemeCrop);
     }
   });
-  ["themeGlassEnabled","themeGlassColour","themeGlassTransparency"].forEach(function(id){
+  ["themeGlassEnabled","themeGlassColour","themeGlassTransparency",
+   "themeTextColourEnabled","themeTextColour","themeSubTextColourEnabled","themeSubTextColour"].forEach(function(id){
     var el=document.getElementById(id);
     if(el){
       el.addEventListener("input",updateThemeCreatorPreview);
@@ -22041,7 +22113,7 @@
     page.theme=normalisePageTheme(page.theme);
 
     document.querySelectorAll(".screenUi").forEach(function(screen){
-      screen.classList.remove("theme-simple","theme-burnt-orange","theme-custom","custom-mode-image","custom-mode-gradient","custom-mode-combined","custom-glass-off","page-kind-settings","page-kind-activities","page-kind-activity","page-kind-device","page-kind-custom");
+      screen.classList.remove("custom-text","custom-subtext","theme-simple","theme-burnt-orange","theme-custom","custom-mode-image","custom-mode-gradient","custom-mode-combined","custom-glass-off","page-kind-settings","page-kind-activities","page-kind-activity","page-kind-device","page-kind-custom");
       var customTheme=themeById(page.theme);
       if(page.theme!=="simple" && page.theme!=="burnt-orange" && customTheme){
         screen.classList.add("theme-custom");
@@ -22060,6 +22132,10 @@
         var glassAlpha=(typeof customTheme.glassTransparency==="number" ? customTheme.glassTransparency : 25)/100;
         screen.style.setProperty("--custom-glass-colour",hexToRgba(customTheme.glassColour || "#4d2512",Math.max(0,Math.min(1,glassAlpha))));
         screen.classList.toggle("custom-glass-off",customTheme.glassEnabled===false);
+        screen.classList.toggle("custom-text",!!customTheme.textColour);
+        screen.classList.toggle("custom-subtext",!!customTheme.subTextColour);
+        screen.style.setProperty("--custom-text-colour",customTheme.textColour || "#ffffff");
+        screen.style.setProperty("--custom-subtext-colour",customTheme.subTextColour || "#becade");
         var splitPct=customTheme.split/320*100;
         screen.style.setProperty("--custom-theme-split",splitPct+"%");
       }else{

@@ -8550,6 +8550,23 @@ struct RuntimeThemeStyle {
   uint8_t rowCount;
   uint8_t glassOpacity;
   bool glassEnabled;
+  // Optional text colours; without them text is white over the default grey.
+  bool hasTextColour;
+  bool hasSubTextColour;
+  uint32_t textColour;
+  uint32_t subTextColour;
+};
+
+// The theme whose text colours textPrimary() and textSecondary() use right
+// now. Set only while a themed page is rendered or one of its widgets is
+// refreshed, so Settings, pop-ups and overlays keep the default colours.
+const RuntimeThemeStyle *textThemeScope = nullptr;
+struct TextThemeScope {
+  const RuntimeThemeStyle *previous;
+  explicit TextThemeScope(const RuntimeThemeStyle *theme) : previous(textThemeScope) {
+    textThemeScope = theme;
+  }
+  ~TextThemeScope() { textThemeScope = previous; }
 };
 
 // DeviceCommand.slot for a command its device page's layout leaves off the
@@ -9657,6 +9674,9 @@ bool physicalNavCurrentPressed = false;
 lv_style_t physicalNavFocusStyle;
 bool physicalNavFocusStyleReady = false;
 lv_color_t lvRgb(uint8_t r, uint8_t g, uint8_t b);
+// The default subtext colour (6.13): much brighter than the old (142,155,180),
+// which was hard to read on the dark Settings cards.
+static const uint8_t SUBTEXT_RED = 190, SUBTEXT_GREEN = 202, SUBTEXT_BLUE = 222;
 
 // LVGL's default theme focus outline turned out to be invisible in practice
 // here - makeOmoteRow()'s row calls lv_obj_remove_style_all() (stripping
@@ -11096,6 +11116,9 @@ struct PageUi {
   uint16_t *wallpaperPixels = nullptr;
   lv_img_dsc_t wallpaperDescriptor = {};
   char themePath[72] = "";
+  // The theme this slot's text colours come from. Kept apart from themePath,
+  // which is cleared when the wallpaper cannot be loaded.
+  char textThemePath[72] = "";
   CachedPageIcon iconCache[MAX_PAGE_ICON_CACHE] = {};
   uint8_t iconCacheCount = 0;
   // PSRAM, not internal RAM. As a fixed array this was
@@ -11470,6 +11493,8 @@ void hideBackupOverlay();
 void stepBackupOverlayMark();
 bool sdBusyWithBackupJob();
 lv_color_t textPrimary();
+lv_color_t textSecondary();
+const RuntimeThemeStyle *textThemeFor(const lv_obj_t *obj);
 lv_obj_t *makeLabel(lv_obj_t *parent, const char *text, int x, int y,
                     const lv_font_t *font, lv_color_t colour);
 void setLcdBackupPhaseFraction(const char *phase, float within, float low, float high);
@@ -20270,6 +20295,13 @@ void loadRuntimeModel(JsonDocument &doc) {
     theme.glassColour = parseThemeColour(source["glassColour"] | "#24384d", 0x24384D);
     int opacityPercent = constrain((int)(source["glassTransparency"] | 25), 0, 100);
     theme.glassOpacity = (uint8_t)((opacityPercent * 255L) / 100L);
+    const uint32_t NO_COLOUR = 0xFF000000UL;
+    uint32_t textColour = parseThemeColour(source["textColour"] | "", NO_COLOUR);
+    uint32_t subTextColour = parseThemeColour(source["subTextColour"] | "", NO_COLOUR);
+    theme.hasTextColour = textColour != NO_COLOUR;
+    theme.hasSubTextColour = subTextColour != NO_COLOUR;
+    theme.textColour = textColour;
+    theme.subTextColour = subTextColour;
   }
 
   // Reads and line-parses every .ir file in /devices via String-based
@@ -32495,6 +32527,8 @@ void invalidateWallpaperCacheForPath(const String &path) {
 bool applyRuntimeTheme(const char *path) {
   if (!boundPageUi || !wallpaper) return false;
   activeRuntimeThemeStyle = findRuntimeThemeStyle(path);
+  textThemeScope = activeRuntimeThemeStyle;
+  strlcpy(boundPageUi->textThemePath, path ? path : "", sizeof(boundPageUi->textThemePath));
   if (path && strcmp(path, "builtin:burnt-orange") == 0) {
     if (boundPageUi->wallpaperPixels) {
       lv_img_set_src(wallpaper, nullptr);
@@ -32807,8 +32841,30 @@ lv_color_t lvRgb(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 lv_color_t textPrimary() {
+  if (textThemeScope && textThemeScope->hasTextColour) {
+    return lv_color_hex(textThemeScope->textColour);
+  }
   // The 1-bpp fonts have no blended edge pixels, so true white remains sharp.
   return lv_color_white();
+}
+
+// Subtitles, captions and other second-rank text on every screen. Settings
+// screens never have a theme in scope, so they always get the default.
+lv_color_t textSecondary() {
+  if (textThemeScope && textThemeScope->hasSubTextColour) {
+    return lv_color_hex(textThemeScope->subTextColour);
+  }
+  return lvRgb(SUBTEXT_RED, SUBTEXT_GREEN, SUBTEXT_BLUE);
+}
+
+// The theme of the page `obj` sits on; null for anything on an overlay.
+const RuntimeThemeStyle *textThemeFor(const lv_obj_t *obj) {
+  for (const lv_obj_t *o = obj; o; o = lv_obj_get_parent(o)) {
+    for (uint8_t i = 0; i < PAGE_SLOT_COUNT; i++) {
+      if (o == pageUi[i].content) return findRuntimeThemeStyle(pageUi[i].textThemePath);
+    }
+  }
+  return nullptr;
 }
 
 void stylePanel(lv_obj_t *obj, lv_color_t bg, lv_color_t border, lv_opa_t opa = LV_OPA_COVER) {
@@ -33533,7 +33589,7 @@ void rebuildEspNowPairedList() {
   lv_obj_clean(espNowPairedList);
   if (espNowDeviceCount == 0) {
     lv_obj_t *empty = makeLabel(espNowPairedList, "No docks paired yet.\nUse Search to find one.",
-                                0, 0, &lv_font_montserrat_12, lvRgb(150, 160, 175));
+                                0, 0, &lv_font_montserrat_12, textSecondary());
     lv_label_set_long_mode(empty, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(empty, LCD_W - 40);
     lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
@@ -33568,7 +33624,7 @@ void rebuildEspNowPairedList() {
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
 
     lv_obj_t *mac = makeLabel(card, formatMacAddress(espNowDevices[i].mac).c_str(),
-                              12, 31, &lv_font_montserrat_10, lvRgb(140, 155, 175));
+                              12, 31, &lv_font_montserrat_12, textSecondary());
     lv_obj_set_width(mac, 192);
     lv_label_set_long_mode(mac, LV_LABEL_LONG_DOT);
 
@@ -34754,7 +34810,8 @@ void ensureStatusPill() {
   lv_obj_clear_flag(pill, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(pill, [](lv_event_t *e) { toggleBrightnessPanel(); }, LV_EVENT_CLICKED, nullptr);
 
-  clockLabel = makeLabel(pill, "--:--", 4, 8, &lv_font_montserrat_12, textPrimary());
+  // Shared by every page and made only once, so never a theme's colour.
+  clockLabel = makeLabel(pill, "--:--", 4, 8, &lv_font_montserrat_12, lv_color_white());
   lv_obj_set_width(clockLabel, 54);
   lv_obj_set_style_text_align(clockLabel, LV_TEXT_ALIGN_RIGHT, 0);
 
@@ -34956,6 +35013,13 @@ void setTopBarTitle(const char *title, bool allowDevices) {
   }
   lv_obj_set_pos(topBarTitleLabel, titleX, 9);
   lv_obj_set_width(topBarTitleLabel, titleWidth);
+  {
+    TextThemeScope textScope(
+      boundPageUi && pages[currentPage].kind != PAGE_REMOTE_SETTINGS
+        ? findRuntimeThemeStyle(boundPageUi->textThemePath) : nullptr);
+    lv_obj_set_style_text_color(topBarTitleLabel, textPrimary(), 0);
+    lv_obj_set_style_text_color(topBarDownHint, textPrimary(), 0);
+  }
   lv_obj_set_x(topBarDownHint, 119 - crashBadgeSpace());
   // Beside the close button there is room for "Settings" only in a smaller size.
   lv_obj_set_style_text_font(topBarTitleLabel,
@@ -35088,7 +35152,7 @@ lv_obj_t *makeSettingRow(const char *name, const char *sub, int y, bool *switchT
   }
   stylePanel(row, lvRgb(34, 35, 39), lvRgb(54, 56, 62));
   lv_obj_t *nameLabel = makeLabel(row, name, 8, 2, &lv_font_montserrat_16, textPrimary());
-  lv_obj_t *subLabel = makeLabel(row, sub, 8, 24, &lv_font_montserrat_10, lvRgb(150, 150, 160));
+  lv_obj_t *subLabel = makeLabel(row, sub, 8, 24, &lv_font_montserrat_12, textSecondary());
   if (nameLabelOut) *nameLabelOut = nameLabel;
   if (subLabelOut) *subLabelOut = subLabel;
 
@@ -35180,9 +35244,11 @@ lv_obj_t *makeOmoteRow(lv_obj_t *card, const char *name, const char *value, int 
     // colour rather than a separate grey hex (e.g. its Wi-Fi "Not connected"
     // and backup status labels) - matched here instead of the old fixed
     // lvRgb(140,145,155).
-    lv_obj_t *sub = makeLabel(row, value, 14, 27, &lv_font_montserrat_10, textPrimary());
-    lv_obj_set_style_text_opa(sub, LV_OPA_60, 0);
-    lv_obj_set_width(sub, switchTarget ? 130 : 155);
+    lv_obj_t *sub = makeLabel(row, value, 14, 27, &lv_font_montserrat_12, textPrimary());
+    lv_obj_set_style_text_opa(sub, LV_OPA_80, 0);
+    lv_obj_set_width(sub, switchTarget ? 150 : 178);
+    // A fixed height, or LONG_DOT wraps instead of truncating.
+    lv_obj_set_height(sub, 15);
     lv_label_set_long_mode(sub, LV_LABEL_LONG_DOT);
     if (subLabelOut) *subLabelOut = sub;
   }
@@ -35349,7 +35415,7 @@ lv_obj_t *makeStormyRowEx(lv_obj_t *card, const char *name, const char *sub,
                           const char *value, int y, int height, bool *switchTarget,
                           lv_event_cb_t clickCallback, lv_obj_t **nameLabelOut,
                           lv_obj_t **subLabelOut) {
-  const lv_color_t muted = lvRgb(142, 155, 180);
+  const lv_color_t muted = textSecondary();
   lv_obj_t *row = lv_obj_create(card);
   lv_obj_remove_style_all(row);
   lv_obj_set_pos(row, 1, y);
@@ -35370,15 +35436,15 @@ lv_obj_t *makeStormyRowEx(lv_obj_t *card, const char *name, const char *sub,
                                   &lv_font_montserrat_14, textPrimary());
   if (nameLabelOut) *nameLabelOut = nameLabel;
   if (hasSub) {
-    lv_obj_t *subLabel = makeLabel(row, sub, 14, height / 2 + 3, &lv_font_montserrat_10, muted);
+    lv_obj_t *subLabel = makeLabel(row, sub, 14, height / 2 + 2, &lv_font_montserrat_12, muted);
     if (subLabelOut) *subLabelOut = subLabel;
     // One line, cut short with an ellipsis. LONG_DOT only truncates a label
     // whose height is fixed; left to size itself it wrapped onto a second line
     // and ran through the divider below ("+0.00% in last 24 hours"). Rows with
     // neither a switch nor a right-hand value get the full width.
     bool hasValue = value && value[0];
-    lv_obj_set_width(subLabel, switchTarget ? 140 : (hasValue ? 100 : 190));
-    lv_obj_set_height(subLabel, 13);
+    lv_obj_set_width(subLabel, switchTarget ? 150 : (hasValue ? 100 : 184));
+    lv_obj_set_height(subLabel, 15);
     lv_label_set_long_mode(subLabel, LV_LABEL_LONG_DOT);
   }
   if (switchTarget) {
@@ -35391,8 +35457,8 @@ lv_obj_t *makeStormyRowEx(lv_obj_t *card, const char *name, const char *sub,
     addPhysicalNavFocusable(sw);
   } else if (clickCallback) {
     if (value && value[0]) {
-      lv_obj_t *valueLabel = makeLabel(row, value, 86, (height - 13) / 2,
-                                       &lv_font_montserrat_10, muted);
+      lv_obj_t *valueLabel = makeLabel(row, value, 86, (height - 15) / 2,
+                                       &lv_font_montserrat_12, muted);
       lv_obj_set_width(valueLabel, 104);
       lv_obj_set_style_text_align(valueLabel, LV_TEXT_ALIGN_RIGHT, 0);
       lv_label_set_long_mode(valueLabel, LV_LABEL_LONG_DOT);
@@ -35513,7 +35579,7 @@ void renderSettingsHomeStormy() {
   lv_obj_set_height(content, LCD_H - 42);
   applyStormyBackground();
   const int rowH = 44;
-  const lv_color_t muted = lvRgb(142, 155, 180);
+  const lv_color_t muted = textSecondary();
 
   // Battery summary at the top, opening the Battery page.
   float percent = readBatteryPercent();
@@ -35527,7 +35593,7 @@ void renderSettingsHomeStormy() {
   lv_obj_add_event_cb(hero, [](lv_event_t *e) { openSettingsView(SETTINGS_BATTERY); },
                       LV_EVENT_CLICKED, nullptr);
   addPhysicalNavFocusable(hero);
-  makeLabel(hero, "Remote battery", 12, 8, &lv_font_montserrat_10, muted);
+  makeLabel(hero, "Remote battery", 12, 7, &lv_font_montserrat_12, muted);
   char percentText[8];
   if (percent < 0.0f) strlcpy(percentText, "--%", sizeof(percentText));
   else snprintf(percentText, sizeof(percentText), "%d%%", level);
@@ -35655,8 +35721,8 @@ void makeOmoteBatteryCard(int y) {
                       LV_EVENT_CLICKED, nullptr);
   addPhysicalNavFocusable(card);
 
-  lv_obj_t *caption = makeLabel(card, "Remote battery", 14, 8, &lv_font_montserrat_10, textPrimary());
-  lv_obj_set_style_text_opa(caption, LV_OPA_60, 0);
+  lv_obj_t *caption = makeLabel(card, "Remote battery", 14, 7, &lv_font_montserrat_12, textPrimary());
+  lv_obj_set_style_text_opa(caption, LV_OPA_80, 0);
   char percentText[8];
   if (percent < 0.0f) strlcpy(percentText, "--%", sizeof(percentText));
   else snprintf(percentText, sizeof(percentText), "%d%%", level);
@@ -35724,12 +35790,12 @@ void renderSettingsHomeOmote() {
       if (lv_event_get_target(e) == lv_event_get_current_target(e)) openSettingsView(SETTINGS_BLUETOOTH);
     });
   makeOmoteDivider(card, y + rowH); y += rowH + 1;
-  makeOmoteRow(card, "Clock", clockUseInternetTime ? "Internet time and manual wheels" : "Manual time wheels", y, rowH, &clockEnabled,
+  makeOmoteRow(card, "Clock", clockUseInternetTime ? "Internet or manual" : "Manual time wheels", y, rowH, &clockEnabled,
     [](lv_event_t *e) {
       if (lv_event_get_target(e) == lv_event_get_current_target(e)) openSettingsView(SETTINGS_CLOCK);
     });
   makeOmoteDivider(card, y + rowH); y += rowH + 1;
-  makeOmoteRow(card, "Wi-Fi Config", WiFi.status() == WL_CONNECTED ? "Scan QR to open WebConfig" : "Scan QR to join setup network", y, rowH, nullptr,
+  makeOmoteRow(card, "Wi-Fi Config", WiFi.status() == WL_CONNECTED ? "Scan QR to open WebConfig" : "Scan QR to join setup Wi-Fi", y, rowH, nullptr,
     [](lv_event_t *e) { openSettingsView(SETTINGS_WIFI_QR); });
   makeOmoteDivider(card, y + rowH); y += rowH + 1;
   makeOmoteRow(card, "Display", "Brightness, sleep, wake", y, rowH, nullptr,
@@ -35738,19 +35804,19 @@ void renderSettingsHomeOmote() {
   makeOmoteRow(card, "Buttons", "Backlight and hold behaviour", y, rowH, nullptr,
     [](lv_event_t *e) { openSettingsView(SETTINGS_BUTTONS); });
   makeOmoteDivider(card, y + rowH); y += rowH + 1;
-  makeOmoteRow(card, "Dock", "Blaster dock pairing over ESP-NOW", y, rowH, nullptr,
+  makeOmoteRow(card, "Dock", "Dock pairing over ESP-NOW", y, rowH, nullptr,
     [](lv_event_t *e) { openSettingsView(SETTINGS_DOCK); });
   makeOmoteDivider(card, y + rowH); y += rowH + 1;
   // Hidden unless Settings > About > Debug Menu is on.
   if (debugMenuVisible) {
-    makeOmoteRow(card, "Debug", "Touch, display, sensors and microphone", y, rowH, nullptr,
+    makeOmoteRow(card, "Debug", "Touch, screen, sensors, mic", y, rowH, nullptr,
       [](lv_event_t *e) { openSettingsView(SETTINGS_DEBUG); });
     makeOmoteDivider(card, y + rowH); y += rowH + 1;
   }
   makeOmoteRow(card, "Backup / Restore", "Full configuration backups", y, rowH, nullptr,
     [](lv_event_t *e) { openSettingsView(SETTINGS_BACKUP); });
   makeOmoteDivider(card, y + rowH); y += rowH + 1;
-  makeOmoteRow(card, "About", "Version, device and battery information", y, rowH, nullptr,
+  makeOmoteRow(card, "About", "Version, device and battery", y, rowH, nullptr,
     [](lv_event_t *e) { openSettingsView(SETTINGS_ABOUT); });
 }
 
@@ -35914,14 +35980,14 @@ void renderBluetoothPageOmote() {
   lv_label_set_long_mode(stateLabel, LV_LABEL_LONG_DOT);
   makeLabel(statusCard, BLE_HID_NAME, 14, 42, &lv_font_montserrat_12, textPrimary());
   lv_obj_t *l1 = makeLabel(statusCard, "On Chromecast open Settings >", 14, 66,
-                           &lv_font_montserrat_10, textPrimary());
-  lv_obj_set_style_text_opa(l1, LV_OPA_60, 0);
-  lv_obj_t *l2 = makeLabel(statusCard, "Remotes & Accessories > Pair", 14, 82,
-                           &lv_font_montserrat_10, textPrimary());
-  lv_obj_set_style_text_opa(l2, LV_OPA_60, 0);
-  lv_obj_t *l3 = makeLabel(statusCard, "remote, then choose OpenRemote HID.", 14, 98,
-                           &lv_font_montserrat_10, textPrimary());
-  lv_obj_set_style_text_opa(l3, LV_OPA_60, 0);
+                           &lv_font_montserrat_12, textPrimary());
+  lv_obj_set_style_text_opa(l1, LV_OPA_80, 0);
+  lv_obj_t *l2 = makeLabel(statusCard, "Remotes & Accessories >", 14, 82,
+                           &lv_font_montserrat_12, textPrimary());
+  lv_obj_set_style_text_opa(l2, LV_OPA_80, 0);
+  lv_obj_t *l3 = makeLabel(statusCard, "Pair remote > OpenRemote HID.", 14, 98,
+                           &lv_font_montserrat_12, textPrimary());
+  lv_obj_set_style_text_opa(l3, LV_OPA_80, 0);
 
   int y = 174;
   lv_obj_t *pair = makeOmoteButton(content, bleBonded ? "Pair another" : "Start pairing",
@@ -36538,9 +36604,12 @@ void renderWifiPasswordPageOmote() {
     // saveWifiCredentials(ssid, "")), so an empty saved password reliably means
     // "open network" here rather than a real (never blank in practice) one.
     bool savedIsOpen = savedWifiPassword(selectedWifiSsid).isEmpty();
-    makeLabel(content, savedIsOpen ? "This is a saved open network - no password required."
-                                   : "A password is saved for this network.",
-              10, 88, &lv_font_montserrat_10, textPrimary());
+    lv_obj_t *savedHint = makeLabel(content,
+              savedIsOpen ? "This is a saved open network - no password required."
+                          : "A password is saved for this network.",
+              10, 84, &lv_font_montserrat_12, textSecondary());
+    lv_obj_set_width(savedHint, 220);
+    lv_label_set_long_mode(savedHint, LV_LABEL_LONG_WRAP);
     lv_obj_t *useSaved = makeOmoteButton(content, savedIsOpen ? "Reconnect" : "Use saved password",
                                         8, 116, 224, 42, lvRgb(0x21, 0x96, 0xF3));
     lv_obj_add_event_cb(useSaved, useSavedWifiEvent, LV_EVENT_CLICKED, nullptr);
@@ -36617,11 +36686,11 @@ void renderWifiQrPageOmote() {
   bool connectionReady = stationConnected || setupApActive;
   if (!connectionReady) {
     makeLabel(content, "Connecting to saved Wi-Fi...", 18, 112, &lv_font_montserrat_12, textPrimary());
-    lv_obj_t *sub = makeLabel(content, "Setup AP starts automatically if needed", 15, 140,
-                              &lv_font_montserrat_10, textPrimary());
-    lv_obj_set_style_text_opa(sub, LV_OPA_60, 0);
-    setupApStatusLabel = makeLabel(content, "", 18, 172, &lv_font_montserrat_10, textPrimary());
-    lv_obj_set_style_text_opa(setupApStatusLabel, LV_OPA_60, 0);
+    lv_obj_t *sub = makeLabel(content, "Setup AP starts if needed", 18, 140,
+                              &lv_font_montserrat_12, textPrimary());
+    lv_obj_set_style_text_opa(sub, LV_OPA_80, 0);
+    setupApStatusLabel = makeLabel(content, "", 18, 172, &lv_font_montserrat_12, textPrimary());
+    lv_obj_set_style_text_opa(setupApStatusLabel, LV_OPA_80, 0);
     refreshSetupApStatusLabel();
     nextSetupApStatusRefreshMs = millis() + 1000UL;
     return;
@@ -36645,15 +36714,15 @@ void renderWifiQrPageOmote() {
 
   lv_obj_t *wifiLabel = makeLabel(content, stationConnected ? "Connected Wi-Fi" :
             (setupApActive ? setupApSsid.c_str() : "Turn Wi-Fi on to start setup"), 0, 236,
-            &lv_font_montserrat_10, textPrimary());
+            &lv_font_montserrat_12, textPrimary());
   lv_obj_set_width(wifiLabel, LCD_W);
   lv_obj_set_style_text_align(wifiLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_opa(wifiLabel, LV_OPA_60, 0);
+  lv_obj_set_style_text_opa(wifiLabel, LV_OPA_80, 0);
 
-  setupApStatusLabel = makeLabel(content, "", 0, 252, &lv_font_montserrat_10, textPrimary());
+  setupApStatusLabel = makeLabel(content, "", 0, 252, &lv_font_montserrat_12, textPrimary());
   lv_obj_set_width(setupApStatusLabel, LCD_W);
   lv_obj_set_style_text_align(setupApStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_opa(setupApStatusLabel, LV_OPA_60, 0);
+  lv_obj_set_style_text_opa(setupApStatusLabel, LV_OPA_80, 0);
   refreshSetupApStatusLabel();
   nextSetupApStatusRefreshMs = millis() + 1000UL;
 }
@@ -36721,9 +36790,9 @@ void buildNumberOptions(char *buffer, size_t size, int start, int end, uint8_t w
 
 lv_obj_t *makeClockRoller(int index, const char *label, int x, int y, int w,
                           const char *options, int selected, bool omoteStyle = false) {
-  lv_obj_t *lbl = makeLabel(content, label, x, y - 16, &lv_font_montserrat_10,
-                            omoteStyle ? textPrimary() : lvRgb(150, 160, 176));
-  if (omoteStyle) lv_obj_set_style_text_opa(lbl, LV_OPA_60, 0);
+  lv_obj_t *lbl = makeLabel(content, label, x, y - 16, &lv_font_montserrat_12,
+                            omoteStyle ? textPrimary() : textSecondary());
+  if (omoteStyle) lv_obj_set_style_text_opa(lbl, LV_OPA_80, 0);
   lv_obj_t *roller = lv_roller_create(content);
   lv_obj_set_pos(roller, x, y);
   lv_obj_set_size(roller, w, 64);
@@ -36843,7 +36912,7 @@ void renderClockPageOmote() {
                49, 48, &clock24Hour);
   makeOmoteDivider(toggleCard, 97);
   makeOmoteRow(toggleCard, "Internet time", hasAnyWifiProfile()
-    ? "Boot and daily 3am sync" : "Needs a saved Wi-Fi network", 98, 48, &clockUseInternetTime);
+    ? "Boot and daily 3am sync" : "Needs saved Wi-Fi", 98, 48, &clockUseInternetTime);
 
   int y = 44 + 3 * 48 + 2 + 12;
   if (clockUseInternetTime) {
@@ -36853,7 +36922,7 @@ void renderClockPageOmote() {
     y += 48 + 12;
     lv_obj_t *note = makeLabel(content, "Wi-Fi turns on only while time syncs.", 12, y,
               &lv_font_montserrat_12, textPrimary());
-    lv_obj_set_style_text_opa(note, LV_OPA_60, 0);
+    lv_obj_set_style_text_opa(note, LV_OPA_80, 0);
     return;
   }
 
@@ -37171,7 +37240,7 @@ void renderDisplayPageOmote() {
   lv_dropdown_set_selected(wakeDropdown, wakeMode == WAKE_MODE_BUTTON ? 1 : 0);
   lv_obj_add_event_cb(wakeDropdown, wakeModeDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
   makeOmoteDivider(optionsCard, rowH);
-  makeOmoteRow(optionsCard, "Face-down sleep", "Sleep when screen faces down",
+  makeOmoteRow(optionsCard, "Face-down sleep", "Sleep when turned over",
                rowH + 1, rowH, &faceDownSleepEnabled);
   makeOmoteDivider(optionsCard, 2 * rowH + 1);
   makeOmoteRow(optionsCard, "Colour Depth", displayRgb666 ? "RGB666 panel transfer" : "RGB565 panel transfer", 2 * rowH + 2, rowH, &displayRgb666);
@@ -37191,7 +37260,7 @@ void renderDisplayPageOmote() {
   // "Menu" so the dropdown has room; the explanation above is unchanged.
   lv_obj_t *menuLabel = makeLabel(content, "Menu and page swipe (apply immediately)", 8, y,
                                   &lv_font_montserrat_12, textPrimary());
-  lv_obj_set_style_text_opa(menuLabel, LV_OPA_60, 0);
+  lv_obj_set_style_text_opa(menuLabel, LV_OPA_80, 0);
   y += 22;
   lv_obj_t *menuCard = makeOmoteCard(content, y, 3 * rowH + 3 + sliderH);
   makeOmoteRow(menuCard, "Swipe to Settings", "Off: gear by clock",
@@ -37252,7 +37321,7 @@ void renderDisplayPageStormy() {
   lv_obj_add_event_cb(wakeDropdown, wakeModeDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
   stormyWakeDropdown = wakeDropdown;
   makeStormyDivider(panelCard, rowH);
-  makeStormyRow(panelCard, "Face-down sleep", "Sleep when screen faces down",
+  makeStormyRow(panelCard, "Face-down sleep", "Sleep when turned over",
                 nullptr, rowH + 1, rowH, &faceDownSleepEnabled, nullptr);
   makeStormyDivider(panelCard, 2 * rowH + 1);
   makeStormyRow(panelCard, "Colour Depth", displayRgb666 ? "RGB666 panel transfer" : "RGB565 panel transfer",
@@ -37269,7 +37338,7 @@ void renderDisplayPageStormy() {
   // Menu style, moved here from Settings > Debug in 5.65. Labelled just
   // "Menu" so the dropdown has room; the explanation above is unchanged.
   makeLabel(content, "Menu and page swipe (apply immediately)", 12, y, &lv_font_montserrat_12,
-            lvRgb(142, 155, 180));
+            textSecondary());
   y += 20;
   lv_obj_t *menuCard = makeStormyCard(content, y, 3 * rowH + 3 + sliderH);
   makeStormyRow(menuCard, "Swipe to Settings", "Off: gear by clock",
@@ -37429,7 +37498,7 @@ void renderButtonsPageOmote() {
   lv_obj_set_style_radius(buttonTestPanel, 8, 0);
   lv_obj_set_style_border_width(buttonTestPanel, 1, 0);
   buttonTestLabel = makeLabel(buttonTestPanel, "No button pressed", 0, 0,
-                              &lv_font_montserrat_16, lvRgb(150, 150, 160));
+                              &lv_font_montserrat_16, textSecondary());
   lv_obj_set_width(buttonTestLabel, 206);
   lv_obj_set_style_text_align(buttonTestLabel, LV_TEXT_ALIGN_CENTER, 0);
   // A fixed (8,13) position isn't actually centred in the panel - true
@@ -38017,11 +38086,11 @@ void renderDebugPageOmote() {
   y += rowH + 12;
 
   lv_obj_t *togglesCard = makeOmoteCard(content, y, 3 * rowH + 2);
-  makeOmoteRow(togglesCard, "Touch", "Live reticle, coordinates and trail", 0, rowH, &debugTouchEnabled);
+  makeOmoteRow(togglesCard, "Touch", "Reticle and trail", 0, rowH, &debugTouchEnabled);
   makeOmoteDivider(togglesCard, rowH);
-  makeOmoteRow(togglesCard, "CPU / RAM", "Processor load and heap used/free", rowH + 1, rowH, &debugCpuRamEnabled);
+  makeOmoteRow(togglesCard, "CPU / RAM", "Load and free memory", rowH + 1, rowH, &debugCpuRamEnabled);
   makeOmoteDivider(togglesCard, 2 * rowH + 1);
-  makeOmoteRow(togglesCard, "FPS", "Display frames per second", 2 * rowH + 2, rowH, &debugFpsEnabled);
+  makeOmoteRow(togglesCard, "FPS", "Frames per second", 2 * rowH + 2, rowH, &debugFpsEnabled);
   y += 3 * rowH + 2 + 12;
 
   lv_obj_t *accelCard = makeOmoteCard(content, y, rowH);
@@ -38029,7 +38098,7 @@ void renderDebugPageOmote() {
   y += rowH + 12;
 
   lv_obj_t *bleSleepCard = makeOmoteCard(content, y, rowH);
-  makeOmoteRow(bleSleepCard, "Bluetooth Sleep", "On disconnects BLE - may pause casting",
+  makeOmoteRow(bleSleepCard, "Bluetooth Sleep", "On: may pause casting",
               0, rowH, &bluetoothSleepEnabled);
   y += rowH + 12;
 
@@ -38042,7 +38111,7 @@ void renderDebugPageOmote() {
 
   lv_obj_t *driverLabel = makeLabel(content, "Display driver (reboot required)", 8, y,
                                     &lv_font_montserrat_12, textPrimary());
-  lv_obj_set_style_text_opa(driverLabel, LV_OPA_60, 0);
+  lv_obj_set_style_text_opa(driverLabel, LV_OPA_80, 0);
   y += 22;
 
   // One row taller than before: Invert Colours joins Module and LCD Driver
@@ -38057,7 +38126,7 @@ void renderDebugPageOmote() {
   lv_obj_add_event_cb(moduleDropdown, displayModuleDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
 
   makeOmoteDivider(driverCard, calibRowH);
-  makeOmoteRow(driverCard, "Invert Colours", "Flip the panel's colour polarity",
+  makeOmoteRow(driverCard, "Invert Colours", "Flip colour polarity",
                calibRowH + 1, calibRowH, &displayInverted);
 
   makeOmoteDivider(driverCard, 2 * calibRowH + 1);
@@ -38105,7 +38174,7 @@ void renderDebugPageOmote() {
 
   lv_obj_t *pwmLabel = makeLabel(content, "Backlight PWM (applies immediately)", 8, y,
                                  &lv_font_montserrat_12, textPrimary());
-  lv_obj_set_style_text_opa(pwmLabel, LV_OPA_60, 0);
+  lv_obj_set_style_text_opa(pwmLabel, LV_OPA_80, 0);
   y += 22;
   lv_obj_t *pwmCard = makeOmoteCard(content, y, calibRowH);
   lv_obj_t *pwmDropdown = makeOmoteDropdownRow(pwmCard, "PWM", 0, calibRowH, 112);
@@ -38193,7 +38262,7 @@ void renderDockPageOmote() {
   snprintf(espNowStatusText, sizeof(espNowStatusText), "%u paired", (unsigned)espNowDeviceCount);
 
   lv_obj_t *card = makeOmoteCard(content, y, 3 * rowH + 2);
-  makeOmoteRow(card, "ESP-NOW", "Send commands to a paired blaster dock",
+  makeOmoteRow(card, "ESP-NOW", "Send via a paired dock",
               0, rowH, &espNowEnabled);
   makeOmoteDivider(card, rowH);
   // Two separate jobs, two separate rows. One button that both listed what you
@@ -38226,14 +38295,14 @@ void renderDockPageOmote() {
       y += rowH + 14;
     } else {
     makeOmoteDivider(dockCard, rowH);
-    makeOmoteRow(dockCard, "Dock RF433", "Let the dock send RF433 commands",
+    makeOmoteRow(dockCard, "Dock RF433", "Dock sends RF433",
                  rowH + 1, rowH, &dockRfEnabled);
     makeOmoteDivider(dockCard, 2 * rowH + 1);
-    makeOmoteRow(dockCard, "Dock LED", "Blink the dock's LED as it transmits",
+    makeOmoteRow(dockCard, "Dock LED", "Blink when sending",
                  2 * rowH + 2, rowH, &dockLedOnTransmit);
     makeOmoteDivider(dockCard, 3 * rowH + 2);
     makeOmoteRow(dockCard, "Homebridge via dock",
-                 "The dock sends them - far quicker than this remote can",
+                 "Much faster via dock",
                  3 * rowH + 3, rowH, &homebridgeViaDock);
     makeOmoteDivider(dockCard, 4 * rowH + 3);
     lv_obj_t *txDropdown = makeOmoteDropdownRow(dockCard, "Tx Power",
@@ -38256,7 +38325,7 @@ void renderDockPageOmote() {
         : "A dock relays IR and RF433 commands for devices the remote cannot reach "
           "directly. Turn ESP-NOW on, then use Paired devices to search for a dock "
           "in pairing mode.",
-    10, y, &lv_font_montserrat_12, lvRgb(150, 160, 175));
+    10, y, &lv_font_montserrat_12, textSecondary());
   lv_obj_set_width(hint, 216);
   lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
 }
@@ -38618,12 +38687,12 @@ void renderBatteryPage() {
   lv_obj_t *description = makeLabel(
     content,
     "Clears the learned discharge average. The time estimate will rebuild as you use the remote.",
-    10, 475, &lv_font_montserrat_10, textPrimary());
+    10, 475, &lv_font_montserrat_12, textPrimary());
   lv_obj_set_width(description, 220);
   lv_label_set_long_mode(description, LV_LABEL_LONG_WRAP);
-  lv_obj_set_style_text_opa(description, LV_OPA_60, 0);
+  lv_obj_set_style_text_opa(description, LV_OPA_80, 0);
   lv_obj_t *reset = makeOmoteButton(content, "Reset Battery Learning",
-                                    8, 515, 224, 40, lvRgb(115, 38, 45));
+                                    8, 524, 224, 40, lvRgb(115, 38, 45));
   lv_obj_add_event_cb(reset, batteryLearningResetButtonEvent,
                       LV_EVENT_CLICKED, nullptr);
   addPhysicalNavFocusable(reset);
@@ -38878,8 +38947,11 @@ void renderBackupRestorePageOmote() {
   lv_obj_add_event_cb(create, createBackupFromLcd, LV_EVENT_CLICKED, nullptr);
   lv_obj_t *statusLabel = makeLabel(
     content, lcdBackupStatus[0] ? lcdBackupStatus : "Backups are saved on the SD card",
-    10, 90, &lv_font_montserrat_10, textPrimary());
-  lv_obj_set_style_text_opa(statusLabel, LV_OPA_60, 0);
+    10, 87, &lv_font_montserrat_12, textPrimary());
+  lv_obj_set_style_text_opa(statusLabel, LV_OPA_80, 0);
+  // One line, cut short: an error message can be longer than the screen.
+  lv_obj_set_size(statusLabel, 220, 15);
+  lv_label_set_long_mode(statusLabel, LV_LABEL_LONG_DOT);
   lcdBackupStatusLabel = statusLabel;
   lcdBackupTrack = makeLcdBackupTrack(content, 104);
   lcdBackupAnimBar = makeLcdBackupAnimBar(content, 104);
@@ -38889,7 +38961,7 @@ void renderBackupRestorePageOmote() {
   if (!lcdBackupCount) {
     lv_obj_t *none = makeLabel(content, "No full backups found", 10, 145,
                                &lv_font_montserrat_12, textPrimary());
-    lv_obj_set_style_text_opa(none, LV_OPA_60, 0);
+    lv_obj_set_style_text_opa(none, LV_OPA_80, 0);
     return;
   }
   for (uint8_t index = 0; index < lcdBackupCount; index++) {
@@ -39376,11 +39448,11 @@ void renderUsbConnectedScreen() {
   // fixed y of 246 - two labels drawn over each other on every USB connect
   // that was not a fresh install.
   if (usbSdTransferActive()) {
-    lv_obj_t *hint = makeLabel(content, "Transferring files - keep the cable attached",
-                               0, 246, &lv_font_montserrat_10, textPrimary());
+    lv_obj_t *hint = makeLabel(content, "Transferring - keep the cable in",
+                               0, 246, &lv_font_montserrat_12, textPrimary());
     lv_obj_set_width(hint, LCD_W);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_opa(hint, LV_OPA_40, 0);
+    lv_obj_set_style_text_opa(hint, LV_OPA_60, 0);
     // Sit below however many lines the subtitle actually took rather than at
     // a hard-coded y, so this cannot collide again if the wording changes.
     lv_obj_update_layout(subtitle);
@@ -39435,10 +39507,9 @@ void renderActivitiesPage() {
     lv_obj_set_style_text_align(heading, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_obj_t *subtitle = makeLabel(content, "Set up your activities in WebConfig", 0, 178,
-                                   &lv_font_montserrat_12, textPrimary());
+                                   &lv_font_montserrat_12, textSecondary());
     lv_obj_set_width(subtitle, LCD_W);
     lv_obj_set_style_text_align(subtitle, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_opa(subtitle, LV_OPA_60, 0);
 
     lv_obj_t *qrButton = makeOmoteButton(content, "Open WebConfig", (LCD_W - 168) / 2, 214, 168, 40,
                                         lvRgb(0x2F, 0x8C, 0xFF));
@@ -39578,9 +39649,8 @@ void renderActivitiesPage() {
     lv_obj_set_width(name, max(72, 185 - textX));
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     lv_obj_clear_flag(name, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_t *instruction = makeLabel(card, "Slide to activate", textX, nameY + 22,
-                                      &lv_font_montserrat_10, textPrimary());
-    lv_obj_set_style_text_opa(instruction, (lv_opa_t)166, 0);
+    makeLabel(card, "Slide to activate", textX, nameY + 22,
+              &lv_font_montserrat_12, textSecondary());
     lv_obj_clear_flag(instruction, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t *chevrons = makeLabel(card, LV_SYMBOL_RIGHT " " LV_SYMBOL_RIGHT,
@@ -39737,9 +39807,8 @@ void makeNestedActivitySlider(const Tile &tile, uint8_t targetActivityIndex,
     lv_obj_set_width(name, max(72, 185 - textX));
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     lv_obj_clear_flag(name, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_t *instruction = makeLabel(card, "Slide to activate", textX, nameY + 22,
-                                      &lv_font_montserrat_10, textPrimary());
-    lv_obj_set_style_text_opa(instruction, (lv_opa_t)166, 0);
+    makeLabel(card, "Slide to activate", textX, nameY + 22,
+              &lv_font_montserrat_12, textSecondary());
     lv_obj_clear_flag(instruction, LV_OBJ_FLAG_CLICKABLE);
   }
 
@@ -39798,8 +39867,9 @@ void applyLiveTileState(const LiveTileBinding &binding) {
   lv_label_set_text(binding.valueLabel, value && value[0] ? value : "--");
   bool on = value && binding.onValue && binding.onValue[0] &&
             strcasecmp(value, binding.onValue) == 0;
+  TextThemeScope textScope(textThemeFor(binding.valueLabel));
   lv_obj_set_style_text_color(binding.valueLabel,
-                              on ? lvRgb(48, 209, 88) : lvRgb(150, 165, 182), 0);
+                              on ? lvRgb(48, 209, 88) : textSecondary(), 0);
 }
 
 void refreshLiveTiles() {
@@ -40175,7 +40245,7 @@ const void *widgetWallpaperSource(const char *path, uint16_t width, uint16_t hei
 }
 
 lv_color_t widgetMutedColour() {
-  return lvRgb(150, 165, 182);
+  return textSecondary();
 }
 
 bool widgetMediaIsYoutube() {
@@ -41777,6 +41847,7 @@ void buildWidgetFace(WidgetInstance &instance, lv_obj_t *parent, uint8_t kind,
 */
 void refreshWidgetInstance(WidgetInstance &instance) {
   if (!instance.card || !lv_obj_is_valid(instance.card)) return;
+  TextThemeScope textScope(textThemeFor(instance.card));
 
   if (instance.kind == WIDGET_NOWPLAYING) {
     refreshNowPlayingUi(instance.nowPlayingUi);
@@ -43613,11 +43684,16 @@ void renderCurrentPage() {
     lv_obj_set_style_bg_grad_dir(screenRoot, LV_GRAD_DIR_NONE, 0);
     lv_obj_set_style_bg_opa(screenRoot, LV_OPA_COVER, 0);
   }
-  switch (pages[currentPage].kind) {
-    case PAGE_REMOTE_SETTINGS: renderSettingsPage(); break;
-    case PAGE_ACTIVITIES: renderActivitiesPage(); break;
-    case PAGE_ACTIVITY: renderActivityPage(); break;
-    case PAGE_DEVICE: renderDevicePage(); break;
+  {
+    // applyRuntimeTheme(), called by each themed renderer, fills this in.
+    TextThemeScope textScope(nullptr);
+    if (boundPageUi) boundPageUi->textThemePath[0] = '\0';
+    switch (pages[currentPage].kind) {
+      case PAGE_REMOTE_SETTINGS: renderSettingsPage(); break;
+      case PAGE_ACTIVITIES: renderActivitiesPage(); break;
+      case PAGE_ACTIVITY: renderActivityPage(); break;
+      case PAGE_DEVICE: renderDevicePage(); break;
+    }
   }
 
   if (settingsSlideDirection != 0) finishSettingsSlideTransition(settingsSlideDirection);
@@ -43928,8 +44004,8 @@ void showDevicePicker() {
   char countText[16];
   snprintf(countText, sizeof(countText), "%u device%s", (unsigned)DEVICE_COUNT,
            DEVICE_COUNT == 1 ? "" : "s");
-  lv_obj_t *count = makeLabel(card, countText, cardW - 14 - 90, 15, &lv_font_montserrat_10,
-                              openRemoteStyle ? lvRgb(142, 155, 180) : lvRgb(0xAC, 0xAC, 0xAC));
+  lv_obj_t *count = makeLabel(card, countText, cardW - 14 - 90, 13, &lv_font_montserrat_12,
+                              openRemoteStyle ? textSecondary() : lvRgb(0xC8, 0xC8, 0xC8));
   lv_obj_set_width(count, 90);
   lv_obj_set_style_text_align(count, LV_TEXT_ALIGN_RIGHT, 0);
 
@@ -43950,7 +44026,7 @@ void showDevicePicker() {
 
   if (!DEVICE_COUNT) {
     makeLabel(list, "No devices yet", 8, 0, &lv_font_montserrat_12,
-              openRemoteStyle ? lvRgb(142, 155, 180) : lvRgb(0xAC, 0xAC, 0xAC));
+              openRemoteStyle ? textSecondary() : lvRgb(0xC8, 0xC8, 0xC8));
   }
   for (uint8_t i = 0; i < DEVICE_COUNT; i++) {
     lv_obj_t *row = makeDevicePickerRow(list, devices[i].name, i * rowPitch, listW,
@@ -44032,7 +44108,7 @@ void showEspNowDevicesModal() {
   if (espNowDeviceCount == 0 && candidateCount == 0) {
     lv_obj_t *empty = makeLabel(list, "No paired devices yet", 0, 4,
                                 &lv_font_montserrat_12, textPrimary());
-    lv_obj_set_style_text_opa(empty, LV_OPA_60, 0);
+    lv_obj_set_style_text_opa(empty, LV_OPA_80, 0);
   }
   for (uint8_t i = 0; i < espNowDeviceCount; i++, row++) {
     lv_obj_t *rowObj = lv_obj_create(list);
@@ -44064,8 +44140,8 @@ void showEspNowDevicesModal() {
   int actionY = modalHeight - actionRowHeight - 4;
   if (espNowScanActive) {
     lv_obj_t *listening = makeLabel(espNowDevicesModal, "Listening for nearby devices...",
-                                    8, actionY + 6, &lv_font_montserrat_10, textPrimary());
-    lv_obj_set_style_text_opa(listening, LV_OPA_70, 0);
+                                    8, actionY + 5, &lv_font_montserrat_12, textPrimary());
+    lv_obj_set_style_text_opa(listening, LV_OPA_80, 0);
   } else {
     lv_obj_t *scanBtn = makeButton(espNowDevicesModal, "Search for devices", 8, actionY,
                                    204, actionRowHeight - 4, lvRgb(34, 42, 56));
@@ -44249,7 +44325,7 @@ void toggleBrightnessPanel() {
     closes the panel like a tap anywhere else outside the slider.
   */
   const int tileW = 164, tileH = 112, half = tileW / 2;
-  const lv_color_t muted = lvRgb(155, 165, 180);
+  const lv_color_t muted = textSecondary();
   lv_obj_t *tile = lv_obj_create(brightnessOverlay);
   lv_obj_remove_style_all(tile);
   lv_obj_set_size(tile, tileW, tileH);
@@ -44278,7 +44354,7 @@ void toggleBrightnessPanel() {
   brightnessValueLabel = makeLabel(tile, brightnessText, half, 54, &lv_font_montserrat_24, textPrimary());
   lv_obj_set_width(brightnessValueLabel, half);
   lv_obj_set_style_text_align(brightnessValueLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_t *brightnessCaption = makeLabel(tile, "Brightness", half, 86, &lv_font_montserrat_10, muted);
+  lv_obj_t *brightnessCaption = makeLabel(tile, "Brightness", half, 85, &lv_font_montserrat_12, muted);
   lv_obj_set_width(brightnessCaption, half);
   lv_obj_set_style_text_align(brightnessCaption, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -44313,7 +44389,7 @@ void toggleBrightnessPanel() {
   lv_obj_t *batteryValue = makeLabel(tile, batteryText, 0, 54, &lv_font_montserrat_24, textPrimary());
   lv_obj_set_width(batteryValue, half);
   lv_obj_set_style_text_align(batteryValue, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_t *batteryCaption = makeLabel(tile, "Battery", 0, 86, &lv_font_montserrat_10, muted);
+  lv_obj_t *batteryCaption = makeLabel(tile, "Battery", 0, 85, &lv_font_montserrat_12, muted);
   lv_obj_set_width(batteryCaption, half);
   lv_obj_set_style_text_align(batteryCaption, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -45064,6 +45140,8 @@ void serviceIrBlink() {
 // ---------------------------------------------------------------------------
 
 void setupLvgl() {
+  powerTextColourHook = textPrimary;
+  powerMutedColourHook = textSecondary;
   lv_init();
   // A decoded 64x64 RGBA PNG consumes roughly 12 KB in LVGL's 64 KB heap.
   // Multiple cache entries starve image decoding and produce white boxes.

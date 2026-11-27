@@ -46,6 +46,10 @@ struct PowerSeries {
 
 // Supplied by whoever owns the history (the firmware, or the preview tool).
 static PowerSeries (*powerSeriesSource)() = nullptr;
+// The remote points these at its theme-aware text colours; the desktop
+// preview leaves them unset and gets the defaults.
+static lv_color_t (*powerTextColourHook)() = nullptr;
+static lv_color_t (*powerMutedColourHook)() = nullptr;
 
 static const uint8_t POWER_RANGE_COUNT = 9;
 static const uint32_t POWER_RANGE_SECONDS[POWER_RANGE_COUNT] = {
@@ -269,7 +273,7 @@ static void powerGraphDrawEvent(lv_event_t *e) {
   lv_draw_label_dsc_t text;
   lv_draw_label_dsc_init(&text);
   text.font = &lv_font_montserrat_10;
-  text.color = lv_color_make(150, 165, 182);
+  text.color = lv_color_make(190, 202, 222);
 
   if (m->grid) {
     lv_draw_line_dsc_t grid;
@@ -378,7 +382,7 @@ static void powerGraphDrawEvent(lv_event_t *e) {
     lv_draw_label_dsc_t none;
     lv_draw_label_dsc_init(&none);
     none.font = &lv_font_montserrat_10;
-    none.color = lv_color_make(150, 165, 182);
+    none.color = lv_color_make(190, 202, 222);
     none.align = LV_TEXT_ALIGN_CENTER;
     lv_area_t mid = {plot.x1, (lv_coord_t)((plot.y1 + plot.y2) / 2 - 6), plot.x2,
                      (lv_coord_t)((plot.y1 + plot.y2) / 2 + 6)};
@@ -505,7 +509,12 @@ static lv_obj_t *powerLabel(lv_obj_t *parent, const char *text, int x, int y,
   return label;
 }
 
-static inline lv_color_t powerMuted() { return lv_color_make(150, 165, 182); }
+static inline lv_color_t powerMuted() {
+  return powerMutedColourHook ? powerMutedColourHook() : lv_color_make(190, 202, 222);
+}
+static inline lv_color_t powerText() {
+  return powerTextColourHook ? powerTextColourHook() : lv_color_white();
+}
 
 static void powerWidgetDeleted(lv_event_t *e) {
   PowerWidgetUi *ui = (PowerWidgetUi *)lv_event_get_user_data(e);
@@ -561,7 +570,7 @@ static lv_obj_t *makePowerShare(PowerWidgetUi *ui, lv_obj_t *parent, uint8_t cat
     lv_obj_t *name = powerLabel(item, shortName, 0, 0, font, powerMuted());
     (void)name;
   }
-  ui->share[category] = powerLabel(item, "--", 0, 0, font, lv_color_white());
+  ui->share[category] = powerLabel(item, "--", 0, 0, font, powerText());
   return item;
 }
 
@@ -594,7 +603,7 @@ static PowerWidgetUi *buildPowerWidget(lv_obj_t *parent, int width, int height,
   ui->model.range = range < POWER_RANGE_COUNT ? range : POWER_RANGE_DEFAULT;
   ui->model.lineWidth = 2;
   lv_obj_add_event_cb(parent, powerWidgetDeleted, LV_EVENT_DELETE, ui);
-  const lv_color_t white = lv_color_white();
+  const lv_color_t white = powerText();
 
   if (layout == POWER_LAYOUT_SLIM) {
     ui->value = powerLabel(parent, "--", 10, 5, &lv_font_montserrat_16, white, 70);
@@ -614,7 +623,7 @@ static PowerWidgetUi *buildPowerWidget(lv_obj_t *parent, int width, int height,
     ui->detail = powerLabel(parent, "", linesX, tall ? 6 : 4, &lv_font_montserrat_10,
                             powerMuted(), width - pad - linesX, LV_TEXT_ALIGN_RIGHT);
     ui->levels = powerLabel(parent, "", linesX, tall ? 19 : 16, &lv_font_montserrat_10,
-                            lv_color_white(), width - pad - linesX, LV_TEXT_ALIGN_RIGHT);
+                            powerText(), width - pad - linesX, LV_TEXT_ALIGN_RIGHT);
     int graphTop = tall ? 36 : 30;
     int graphBottom = height - (tall ? 24 : 20);
     ui->model.grid = tall;
