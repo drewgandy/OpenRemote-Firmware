@@ -37236,7 +37236,7 @@ void renderDisplayPageOmote() {
 
   lv_obj_t *optionsCard = makeOmoteCard(content, y, 4 * rowH + 3);
   lv_obj_t *wakeDropdown = makeOmoteDropdownRow(optionsCard, "Wake", 0, rowH, 150);
-  lv_dropdown_set_options(wakeDropdown, "Lift or button\nButton only");
+  lv_dropdown_set_options(wakeDropdown, "Motion or Button\nButton");
   lv_dropdown_set_selected(wakeDropdown, wakeMode == WAKE_MODE_BUTTON ? 1 : 0);
   lv_obj_add_event_cb(wakeDropdown, wakeModeDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
   makeOmoteDivider(optionsCard, rowH);
@@ -37316,7 +37316,7 @@ void renderDisplayPageStormy() {
   y += 20;
   lv_obj_t *panelCard = makeStormyCard(content, y, 4 * rowH + 3);
   lv_obj_t *wakeDropdown = makeStormyDropdownRow(panelCard, "Wake", 0, rowH, 150);
-  lv_dropdown_set_options(wakeDropdown, "Lift or button\nButton only");
+  lv_dropdown_set_options(wakeDropdown, "Motion or Button\nButton");
   lv_dropdown_set_selected(wakeDropdown, wakeMode == WAKE_MODE_BUTTON ? 1 : 0);
   lv_obj_add_event_cb(wakeDropdown, wakeModeDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
   stormyWakeDropdown = wakeDropdown;
