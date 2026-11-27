@@ -39649,8 +39649,8 @@ void renderActivitiesPage() {
     lv_obj_set_width(name, max(72, 185 - textX));
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     lv_obj_clear_flag(name, LV_OBJ_FLAG_CLICKABLE);
-    makeLabel(card, "Slide to activate", textX, nameY + 22,
-              &lv_font_montserrat_12, textSecondary());
+    lv_obj_t *instruction = makeLabel(card, "Slide to activate", textX, nameY + 22,
+                                        &lv_font_montserrat_12, textSecondary());
     lv_obj_clear_flag(instruction, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t *chevrons = makeLabel(card, LV_SYMBOL_RIGHT " " LV_SYMBOL_RIGHT,
@@ -39807,8 +39807,8 @@ void makeNestedActivitySlider(const Tile &tile, uint8_t targetActivityIndex,
     lv_obj_set_width(name, max(72, 185 - textX));
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     lv_obj_clear_flag(name, LV_OBJ_FLAG_CLICKABLE);
-    makeLabel(card, "Slide to activate", textX, nameY + 22,
-              &lv_font_montserrat_12, textSecondary());
+    lv_obj_t *instruction = makeLabel(card, "Slide to activate", textX, nameY + 22,
+                                        &lv_font_montserrat_12, textSecondary());
     lv_obj_clear_flag(instruction, LV_OBJ_FLAG_CLICKABLE);
   }
 
