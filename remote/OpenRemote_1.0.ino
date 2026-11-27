@@ -9394,6 +9394,14 @@ int8_t pendingActivityOpen = -1;
 
 bool wifiOn = true;
 bool bluetoothOn = true;
+// Off takes Settings (page 0) out of the swipe order, so it cannot be swiped
+// into by accident. It stays pages[0]; it is then reached from the gear in the
+// status panel (or Stop+Forward) and left with its close button, a left-to-
+// right swipe or Back, returning to the page it was opened from.
+bool settingsInSwipeOrder = true;
+uint8_t settingsReturnPage = 1;
+bool settingsGearPending = false;   // set inside LVGL events, run by loop()
+bool settingsClosePending = false;
 bool clockEnabled = true;
 bool clockUseInternetTime = true;
 bool clock24Hour = false;
@@ -11236,6 +11244,7 @@ void openDevice(uint8_t index);
 void showDevicePicker();
 void toggleBrightnessPanel();
 void closeBrightnessPanel();
+void dismissWidgetFullScreen();
 void enterDisplaySleep();
 void wakeDisplay();
 void enterBleConnectedIdle();
@@ -14005,6 +14014,7 @@ void loadSettings() {
   buttonBacklightBrightness = (uint8_t)constrain(
     (int)preferences.getUChar("btnLight", 100), 0, 100);
   faceDownSleepEnabled = preferences.getBool("faceSleep", true);
+  settingsInSwipeOrder = preferences.getBool("setSwipe", true);
   debugMenuVisible = preferences.getBool("dbgMenu", false);
   debugSplitEnabled = preferences.getBool("dbgSplit", false);
   bluetoothSleepEnabled = preferences.getBool("bleSleep", false);
@@ -14177,6 +14187,7 @@ void saveSettings() {
   preferences.putUChar("btnRate", physicalRepeatRateHz);
   preferences.putUChar("btnLight", buttonBacklightBrightness);
   preferences.putBool("faceSleep", faceDownSleepEnabled);
+  preferences.putBool("setSwipe", settingsInSwipeOrder);
   preferences.putBool("dbgMenu", debugMenuVisible);
   preferences.putBool("dbgSplit", debugSplitEnabled);
   preferences.putBool("bleSleep", bluetoothSleepEnabled);
@@ -16840,6 +16851,7 @@ String buildStatusJson() {
   doc["buttonBacklightBrightness"] = buttonBacklightBrightness;
   doc["faceDownSleepEnabled"] = faceDownSleepEnabled;
   doc["wakeMode"] = wakeMode;
+  doc["settingsInSwipeOrder"] = settingsInSwipeOrder;
   doc["displaySleeping"] = displaySleeping;
   doc["touchDown"] = lvTouchDown;
   doc["awakeForMs"] = (uint32_t)(millis() - lastWakeMs);
@@ -17224,6 +17236,7 @@ void applySettingsJson(JsonVariantConst settings) {
   if (configuredManualEpoch > 0) manualClockEpoch = configuredManualEpoch;
   wakeMode = constrain((int)(settings["wakeMode"] | wakeMode),
                        (int)WAKE_MODE_MOTION, (int)WAKE_MODE_BUTTON);
+  settingsInSwipeOrder = settings["settingsInSwipeOrder"] | settingsInSwipeOrder;
   brightness = constrain((int)(settings["brightness"] | brightness), 5, 100);
   timeoutSeconds = constrain((int)(settings["sleepSeconds"] | timeoutSeconds), 5, 120);
   deepSleepMinutes = normaliseDeepSleepMinutes(
@@ -17340,7 +17353,7 @@ void applySettingsJson(JsonVariantConst settings) {
   static const char *ownedSettingKeys[] = {
     "menuStyle", "displayModule", "displayDriver", "lcdBusHz", "lcdBufferMode",
     "lcdDriveStrength", "backlightPwmHz", "debugMenuVisible", "espNowTxPower",
-    "pageSwipeStyle", "pageSwipeMs"
+    "pageSwipeStyle", "pageSwipeMs", "settingsInSwipeOrder"
   };
   for (const char *key : ownedSettingKeys) {
     if (settings[key].isNull()) { settingsIncomplete = true; break; }
@@ -20929,6 +20942,7 @@ bool persistSettingsToRuntimeConfig() {
   settings["deepSleepMinutes"] = deepSleepMinutes;
   settings["wakeSensitivity"] = wakeSensitivity;
   settings["wakeMode"] = wakeMode;
+  settings["settingsInSwipeOrder"] = settingsInSwipeOrder;
   settings["displayGamma"] = displayGamma;
   settings["displaySaturation"] = displaySaturation;
   settings["displayRgb666"] = displayRgb666;
@@ -32702,6 +32716,21 @@ void lvTouchRead(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     touchLastX = x;
     touchLastY = y;
 
+    // Out of the swipe order, a left-to-right swipe on the Settings home
+    // closes it. Acted on while the finger is down, so lv_indev_wait_release()
+    // can stop the same release clicking the row underneath.
+    if (!settingsInSwipeOrder && !pageFlickHandled &&
+        pages[currentPage].kind == PAGE_REMOTE_SETTINGS &&
+        settingsView == SETTINGS_HOME && !brightnessOverlay) {
+      int dx = (int)x - (int)touchStartX;
+      int dy = abs((int)y - (int)touchStartY);
+      if (dx >= 60 && dy < 35 && dx > 2 * dy && !touchStartedOnSidewaysControl()) {
+        pageFlickHandled = true;
+        settingsClosePending = true;
+        if (touchInputDevice) lv_indev_wait_release(touchInputDevice);
+      }
+    }
+
     // Page flick for every swipe style but Glide (5.94). From the raw points,
     // not LV_EVENT_GESTURE: LVGL withholds the gesture whenever a scrollable
     // ancestor owns the touch, which is every device page.
@@ -33860,11 +33889,18 @@ static const int PAGE_DOT_INSET = 5;
 lv_obj_t *pageDotsBar = nullptr;
 lv_obj_t *pageDotsActive = nullptr;
 
+// The leftmost page a swipe can reach: 1 while Settings is out of the order.
+uint8_t firstSwipePage() {
+  return (!settingsInSwipeOrder && pageCount > 1) ? 1 : 0;
+}
+
 void positionPageDotsActive() {
   if (!pageDotsActive || !lv_obj_is_valid(pageDotsActive) || !pageStrip) return;
-  float position = (float)lv_obj_get_scroll_x(pageStrip) / (float)LCD_W;
+  float position = (float)lv_obj_get_scroll_x(pageStrip) / (float)LCD_W -
+                   (float)firstSwipePage();
+  int last = (int)pageCount - 1 - (int)firstSwipePage();
   if (position < 0.0f) position = 0.0f;
-  if (pageCount > 0 && position > (float)(pageCount - 1)) position = (float)(pageCount - 1);
+  if (last >= 0 && position > (float)last) position = (float)last;
   lv_obj_set_x(pageDotsActive, PAGE_DOT_INSET + (int)roundf(position * PAGE_DOT_PITCH));
 }
 
@@ -34141,8 +34177,9 @@ void startPageTransition(uint8_t target) {
   lv_obj_set_style_img_opa(pageTransitionTo,
                            pageSwipeStyle == PAGE_SWIPE_FADE ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
   lv_obj_set_style_bg_opa(pageTransitionShade, LV_OPA_TRANSP, 0);
-  pageTransitionDotFromX = PAGE_DOT_INSET + from * PAGE_DOT_PITCH;
-  pageTransitionDotToX = PAGE_DOT_INSET + target * PAGE_DOT_PITCH;
+  int firstDot = firstSwipePage();
+  pageTransitionDotFromX = PAGE_DOT_INSET + max(0, (int)from - firstDot) * PAGE_DOT_PITCH;
+  pageTransitionDotToX = PAGE_DOT_INSET + max(0, (int)target - firstDot) * PAGE_DOT_PITCH;
   lv_obj_clear_flag(pageTransitionLayer, LV_OBJ_FLAG_HIDDEN);
   pageTransitionActive = true;
   switchPageStripInstantly(target);
@@ -34215,7 +34252,8 @@ void drawDots() {
   if (!pageDotsBar) return;
   // Settings sub-pages use the whole screen, and the brightness panel's wash
   // would otherwise have the dots sitting bright on top of it.
-  bool hide = pageCount < 2 ||
+  uint8_t dotCount = pageCount - firstSwipePage();
+  bool hide = dotCount < 2 || currentPage < firstSwipePage() ||
               (currentPage == 0 && settingsView != SETTINGS_HOME) ||
               brightnessOverlay != nullptr || deviceModal != nullptr;
   if (hide) {
@@ -34231,7 +34269,7 @@ void drawDots() {
   lv_obj_set_style_bg_opa(pageDotsBar, (lv_opa_t)150, 0);
   lv_obj_set_style_radius(pageDotsBar, LV_RADIUS_CIRCLE, 0);
 
-  for (uint8_t i = 0; i < pageCount; i++) {
+  for (uint8_t i = 0; i < dotCount; i++) {
     lv_obj_t *dot = lv_obj_create(pageDotsBar);
     lv_obj_remove_style_all(dot);
     lv_obj_set_size(dot, PAGE_DOT_SIZE, PAGE_DOT_SIZE);
@@ -34250,7 +34288,7 @@ void drawDots() {
   lv_obj_set_style_bg_opa(pageDotsActive, LV_OPA_90, 0);
   lv_obj_clear_flag(pageDotsActive, LV_OBJ_FLAG_CLICKABLE);
 
-  lv_obj_set_size(pageDotsBar, (pageCount - 1) * PAGE_DOT_PITCH + PAGE_DOT_SIZE + 2 * PAGE_DOT_INSET,
+  lv_obj_set_size(pageDotsBar, (dotCount - 1) * PAGE_DOT_PITCH + PAGE_DOT_SIZE + 2 * PAGE_DOT_INSET,
                   PAGE_DOT_SIZE + 2 * PAGE_DOT_INSET);
   lv_obj_align(pageDotsBar, LV_ALIGN_BOTTOM_MID, 0, -3);
   lv_obj_move_foreground(pageDotsBar);
@@ -34855,14 +34893,51 @@ void repositionStatusPill() {
 }
 
 /*
+  The X on the shared bar: only on the Settings home, and only while Settings
+  is out of the swipe order. Returns whether it is showing.
+*/
+static const int SETTINGS_CLOSE_SPACE = 32;
+lv_obj_t *settingsCloseButton = nullptr;
+
+bool updateSettingsCloseButton() {
+  bool show = !settingsInSwipeOrder && pages[currentPage].kind == PAGE_REMOTE_SETTINGS &&
+              settingsView == SETTINGS_HOME;
+  if (!show) {
+    if (settingsCloseButton) lv_obj_add_flag(settingsCloseButton, LV_OBJ_FLAG_HIDDEN);
+    return false;
+  }
+  if (!settingsCloseButton) {
+    settingsCloseButton = lv_btn_create(topBar);
+    lv_obj_set_pos(settingsCloseButton, 6, 7);
+    lv_obj_set_size(settingsCloseButton, 26, 26);
+    lv_obj_set_style_radius(settingsCloseButton, 13, 0);
+    lv_obj_set_style_bg_color(settingsCloseButton, lvRgb(60, 63, 70), 0);
+    lv_obj_set_style_shadow_width(settingsCloseButton, 0, 0);
+    lv_obj_set_style_pad_all(settingsCloseButton, 0, 0);
+    lv_obj_set_ext_click_area(settingsCloseButton, 8);
+    lv_obj_add_event_cb(settingsCloseButton,
+      [](lv_event_t *e) { settingsClosePending = true; }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *icon = lv_label_create(settingsCloseButton);
+    lv_label_set_text(icon, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+    lv_obj_center(icon);
+  }
+  lv_obj_clear_flag(settingsCloseButton, LV_OBJ_FLAG_HIDDEN);
+  return true;
+}
+
+/*
   Puts one name on the shared bar. Split out of renderTopBar() because a
   swipe between already-rendered tiles changes which page is visible without
   re-rendering anything, and the bar still has to follow - see
   applyTopBarForBoundPage() below.
 */
 void setTopBarTitle(const char *title, bool allowDevices) {
-  int titleX = 8;
-  int titleWidth = (clockEnabled ? 126 : 182) - crashBadgeSpace();
+  bool closeShown = updateSettingsCloseButton();
+  int titleX = closeShown ? 8 + SETTINGS_CLOSE_SPACE : 8;
+  int titleWidth = (clockEnabled ? 126 : 182) - crashBadgeSpace() -
+                   (closeShown ? SETTINGS_CLOSE_SPACE : 0);
   // A long title (e.g. "Backup / Restore") at 20pt doesn't fit titleWidth and
   // was getting cut down to almost nothing by LV_LABEL_LONG_DOT; drop to 16pt
   // for anything past ~10 characters so it still fits and truncates gracefully.
@@ -34882,8 +34957,10 @@ void setTopBarTitle(const char *title, bool allowDevices) {
   lv_obj_set_pos(topBarTitleLabel, titleX, 9);
   lv_obj_set_width(topBarTitleLabel, titleWidth);
   lv_obj_set_x(topBarDownHint, 119 - crashBadgeSpace());
+  // Beside the close button there is room for "Settings" only in a smaller size.
   lv_obj_set_style_text_font(topBarTitleLabel,
-    (allowDevices || longTitle) ? &lv_font_montserrat_16 : &lv_font_montserrat_20, 0);
+    closeShown ? (titleWidth < 80 ? &lv_font_montserrat_14 : &lv_font_montserrat_16)
+    : (allowDevices || longTitle) ? &lv_font_montserrat_16 : &lv_font_montserrat_20, 0);
   topBarAllowDevices = allowDevices;
   if (allowDevices) {
     lv_obj_add_flag(topBarTitleLabel, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
@@ -34977,6 +35054,9 @@ void switchEvent(lv_event_t *e) {
     pendingUiRefresh = settingsView == SETTINGS_BUTTONS;
   } else if (target == &faceDownSleepEnabled) {
     faceDownSinceMs = 0;
+  } else if (target == &settingsInSwipeOrder) {
+    configurePageStripDirections();
+    pendingUiRefresh = true;
   } else if (target == &debugSplitEnabled || target == &debugTouchEnabled ||
              target == &debugCpuRamEnabled ||
              target == &debugAccelerometerEnabled ||
@@ -37113,20 +37193,23 @@ void renderDisplayPageOmote() {
                                   &lv_font_montserrat_12, textPrimary());
   lv_obj_set_style_text_opa(menuLabel, LV_OPA_60, 0);
   y += 22;
-  lv_obj_t *menuCard = makeOmoteCard(content, y, 2 * rowH + 2 + sliderH);
-  lv_obj_t *menuDropdown = makeOmoteDropdownRow(menuCard, "Menu", 0, rowH, 150);
+  lv_obj_t *menuCard = makeOmoteCard(content, y, 3 * rowH + 3 + sliderH);
+  makeOmoteRow(menuCard, "Swipe to Settings", "Off: gear by clock",
+               0, rowH, &settingsInSwipeOrder);
+  makeOmoteDivider(menuCard, rowH);
+  lv_obj_t *menuDropdown = makeOmoteDropdownRow(menuCard, "Menu", rowH + 1, rowH, 150);
   lv_dropdown_set_options(menuDropdown, "OpenRemote\nOMOTE");
   lv_dropdown_set_selected(menuDropdown, menuStyle == 1 ? 1 : 0);
   lv_obj_add_event_cb(menuDropdown, menuStyleDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
-  makeOmoteDivider(menuCard, rowH);
+  makeOmoteDivider(menuCard, 2 * rowH + 1);
   // 96, not the Menu row's 150: the style names are short, and at 150 the
   // dropdown covered the "Page swipe" label.
-  lv_obj_t *swipeDropdown = makeOmoteDropdownRow(menuCard, "Page swipe", rowH + 1, rowH, 96);
+  lv_obj_t *swipeDropdown = makeOmoteDropdownRow(menuCard, "Page swipe", 2 * rowH + 2, rowH, 96);
   lv_dropdown_set_options(swipeDropdown, PAGE_SWIPE_STYLE_OPTIONS);
   lv_dropdown_set_selected(swipeDropdown, pageSwipeStyle);
   lv_obj_add_event_cb(swipeDropdown, pageSwipeStyleDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
-  makeOmoteDivider(menuCard, 2 * rowH + 1);
-  makeDisplaySlider("Swipe time", 2 * rowH + 2 + 8, PAGE_SWIPE_MS_MIN,
+  makeOmoteDivider(menuCard, 3 * rowH + 2);
+  makeDisplaySlider("Swipe time", 3 * rowH + 3 + 8, PAGE_SWIPE_MS_MIN,
                     PAGE_SWIPE_MS_MAX, pageSwipeMs, 6, menuCard, 14, 196, true);
 }
 
@@ -37188,20 +37271,23 @@ void renderDisplayPageStormy() {
   makeLabel(content, "Menu and page swipe (apply immediately)", 12, y, &lv_font_montserrat_12,
             lvRgb(142, 155, 180));
   y += 20;
-  lv_obj_t *menuCard = makeStormyCard(content, y, 2 * rowH + 2 + sliderH);
-  lv_obj_t *menuDropdown = makeStormyDropdownRow(menuCard, "Menu", 0, rowH, 150);
+  lv_obj_t *menuCard = makeStormyCard(content, y, 3 * rowH + 3 + sliderH);
+  makeStormyRow(menuCard, "Swipe to Settings", "Off: gear by clock",
+                nullptr, 0, rowH, &settingsInSwipeOrder, nullptr);
+  makeStormyDivider(menuCard, rowH);
+  lv_obj_t *menuDropdown = makeStormyDropdownRow(menuCard, "Menu", rowH + 1, rowH, 150);
   lv_dropdown_set_options(menuDropdown, "OpenRemote\nOMOTE");
   lv_dropdown_set_selected(menuDropdown, menuStyle == 1 ? 1 : 0);
   lv_obj_add_event_cb(menuDropdown, menuStyleDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
-  makeStormyDivider(menuCard, rowH);
+  makeStormyDivider(menuCard, 2 * rowH + 1);
   // 96, not the Menu row's 150: the style names are short, and at 150 the
   // dropdown covered the "Page swipe" label.
-  lv_obj_t *swipeDropdown = makeStormyDropdownRow(menuCard, "Page swipe", rowH + 1, rowH, 96);
+  lv_obj_t *swipeDropdown = makeStormyDropdownRow(menuCard, "Page swipe", 2 * rowH + 2, rowH, 96);
   lv_dropdown_set_options(swipeDropdown, PAGE_SWIPE_STYLE_OPTIONS);
   lv_dropdown_set_selected(swipeDropdown, pageSwipeStyle);
   lv_obj_add_event_cb(swipeDropdown, pageSwipeStyleDropdownEvent, LV_EVENT_VALUE_CHANGED, nullptr);
-  makeStormyDivider(menuCard, 2 * rowH + 1);
-  makeDisplaySlider("Swipe time", 2 * rowH + 2 + 8, PAGE_SWIPE_MS_MIN,
+  makeStormyDivider(menuCard, 3 * rowH + 2);
+  makeDisplaySlider("Swipe time", 3 * rowH + 3 + 8, PAGE_SWIPE_MS_MIN,
                     PAGE_SWIPE_MS_MAX, pageSwipeMs, 6, menuCard, 14, 194, false);
 }
 
@@ -39144,59 +39230,78 @@ void finaliseRemotePageScrolling() {
   }
 }
 
-// Jumps straight to Settings > Wi-Fi Config from anywhere else in the app -
-// Settings is always pages[0] (see rebuildPages()), so this just points
-// currentPage/pageUi at it directly (LV_ANIM_OFF - no slide, since this is
-// meant to load instantly) and lets openSettingsView()'s own
-// pendingUiRefresh flag render the QR page once currentPage is correct.
-// Same instant jump as jumpToWebConfigQr() below, to any settings view.
-void jumpToSettingsView(SettingsView view) {
-  openSettingsView(view);
+// Puts the strip on Settings (always pages[0], see rebuildPages()) at once,
+// with no slide, remembering the page to return to on close.
+// openSettingsView()'s pendingUiRefresh flag then renders the view.
+void showSettingsPage() {
+  if (currentPage != 0) settingsReturnPage = currentPage;
   currentPage = 0;
   bindPageUi(currentPage);
   if (pageStrip) lv_obj_set_tile(pageStrip, pageUi[currentPage].tile, LV_ANIM_OFF);
   configurePageStripDirections();
 }
 
-void jumpToWebConfigQr(lv_event_t *e) {
-  Serial.println("jumpToWebConfigQr: button tapped");
-  openSettingsView(SETTINGS_WIFI_QR);
-  currentPage = 0;
+// Leaves Settings for `target`. backToSettings() first, for its Wi-Fi/QR
+// cleanup, as a swipe away does in servicePageStripChange().
+void leaveSettingsFor(uint8_t target) {
+  backToSettings(nullptr);
+  if (target == 0 || target >= pageCount) target = pageCount > 1 ? 1 : 0;
+  currentPage = target;
   bindPageUi(currentPage);
   if (pageStrip) lv_obj_set_tile(pageStrip, pageUi[currentPage].tile, LV_ANIM_OFF);
+  applyTopBarForBoundPage();
   configurePageStripDirections();
+  drawDots();
+  applyBluetoothState();
+  physicalNavTouchLocked = false;
+  lastWakeMs = millis();
+}
+
+// The close button, the swipe and Back while Settings is out of the order.
+void closeSettingsPage() {
+  if (pages[currentPage].kind != PAGE_REMOTE_SETTINGS) return;
+  leaveSettingsFor(settingsReturnPage);
+}
+
+// The gear in the status panel.
+void openSettingsFromGear() {
+  closeBrightnessPanel();
+  if (physicalSettingsPageActive()) return;
+  clearModalObjects();
+  dismissWidgetFullScreen();
+  openSettingsView(SETTINGS_HOME);
+  showSettingsPage();
+}
+
+// Jumps straight to a settings view from anywhere else in the app.
+void jumpToSettingsView(SettingsView view) {
+  openSettingsView(view);
+  showSettingsPage();
+}
+
+void jumpToWebConfigQr(lv_event_t *e) {
+  Serial.println("jumpToWebConfigQr: button tapped");
+  jumpToSettingsView(SETTINGS_WIFI_QR);
 }
 
 bool physicalSettingsPageActive() {
   return pages[currentPage].kind == PAGE_REMOTE_SETTINGS;
 }
 
-// Same instant-jump shape as jumpToWebConfigQr() above, triggered by the
-// Stop+Forward physical combo instead of a touch event. Also locks touch out
-// - see lvTouchRead()'s physicalNavTouchLocked check - until
-// exitPhysicalSettingsNav() (the physical Return button) restores it.
+// Triggered by the Stop+Forward physical combo instead of a touch event. Also
+// locks touch out - see lvTouchRead()'s physicalNavTouchLocked check - until
+// exitPhysicalSettingsNav() (the physical Back button) restores it.
 void enterPhysicalSettingsNav() {
   Serial.println("Physical Settings nav: Stop+Forward combo, entering");
-  openSettingsView(SETTINGS_HOME);
-  currentPage = 0;
-  bindPageUi(currentPage);
-  if (pageStrip) lv_obj_set_tile(pageStrip, pageUi[currentPage].tile, LV_ANIM_OFF);
-  configurePageStripDirections();
+  jumpToSettingsView(SETTINGS_HOME);
   physicalNavTouchLocked = true;
 }
 
-// The physical Return button - leaves Settings entirely for the Activities
-// landing page, mirroring what a swipe away from Settings already does in
-// servicePageStripChange() (backToSettings() first, for its Wi-Fi/QR
-// cleanup, then the page switch), rather than a second copy of that cleanup.
+// The physical Back button on the Settings home: to Activities while Settings
+// is in the swipe order, otherwise to the page it was opened from.
 void exitPhysicalSettingsNav() {
-  Serial.println("Physical Settings nav: Return, exiting to Activities");
-  backToSettings(nullptr);
-  currentPage = min((uint8_t)1, (uint8_t)(pageCount - 1));
-  bindPageUi(currentPage);
-  if (pageStrip) lv_obj_set_tile(pageStrip, pageUi[currentPage].tile, LV_ANIM_OFF);
-  configurePageStripDirections();
-  physicalNavTouchLocked = false;
+  Serial.println("Physical Settings nav: Back, leaving Settings");
+  leaveSettingsFor(settingsInSwipeOrder ? 1 : settingsReturnPage);
 }
 
 void physicalNavReadCb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
@@ -43545,6 +43650,12 @@ void configurePageStripDirections() {
       if (i > 0) direction = (lv_dir_t)(direction | LV_DIR_LEFT);
       if (i + 1 < pageCount) direction = (lv_dir_t)(direction | LV_DIR_RIGHT);
       if (i == 0 && settingsView != SETTINGS_HOME) direction = LV_DIR_NONE;
+      // Out of the swipe order: no way in from page 1, and none out of
+      // Settings by the strip either (closeSettingsPage() does that).
+      if (firstSwipePage() == 1) {
+        if (i == 0) direction = LV_DIR_NONE;
+        if (i == 1) direction = (lv_dir_t)(direction & ~LV_DIR_LEFT);
+      }
     }
     // Every style but Glide moves on a flick, not under the finger: the strip
     // must not scroll, or LVGL never reports the gesture. The directions a
@@ -43663,6 +43774,7 @@ void servicePageStripChange() {
       // rendered a stale "Connecting..." state with no AP and no QR code.
       backToSettings(nullptr);
     }
+    if (target == 0 && previous != 0) settingsReturnPage = previous;
     currentPage = target;
     bindPageUi(currentPage);
     /*
@@ -44205,6 +44317,23 @@ void toggleBrightnessPanel() {
   lv_obj_set_width(batteryCaption, half);
   lv_obj_set_style_text_align(batteryCaption, LV_TEXT_ALIGN_CENTER, 0);
 
+  // The way into Settings that does not depend on the swipe order.
+  if (!physicalSettingsPageActive()) {
+    lv_obj_t *gear = lv_btn_create(brightnessOverlay);
+    lv_obj_set_pos(gear, (192 - tileW) / 2, (LCD_H - tileH) / 2 + tileH + 10);
+    lv_obj_set_size(gear, tileW, 44);
+    stylePanel(gear, lvRgb(18, 22, 30), lv_color_white(), (lv_opa_t)215);
+    lv_obj_set_style_radius(gear, 20, 0);
+    lv_obj_set_style_border_opa(gear, LV_OPA_30, 0);
+    lv_obj_set_style_shadow_width(gear, 0, 0);
+    lv_obj_set_style_pad_all(gear, 0, 0);
+    lv_obj_add_event_cb(gear, [](lv_event_t *e) { settingsGearPending = true; },
+                        LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *gearLabel = makeLabel(gear, LV_SYMBOL_SETTINGS "  Settings", 0, 0,
+                                    &lv_font_montserrat_16, textPrimary());
+    lv_obj_center(gearLabel);
+  }
+
   brightnessLastActivityMs = millis();
   lv_obj_move_foreground(brightnessOverlay);
   drawDots();   // hidden while the panel's wash is up
@@ -44265,8 +44394,9 @@ void openButtonDiagnostic() {
 void changePage(int delta) {
   if (!pageStrip || delta == 0) return;
   activityDragActive = false;
+  if (currentPage < firstSwipePage()) return;
   int next = (int)currentPage + delta;
-  if (next < 0) next = 0;
+  if (next < (int)firstSwipePage()) next = firstSwipePage();
   if (next >= pageCount) next = pageCount - 1;
   if (next == currentPage) return;
   startPageTransition((uint8_t)next);
@@ -45483,6 +45613,14 @@ void loop() {
     LOOP_TIMED("serviceRemoteIdentify", serviceRemoteIdentify(now));
     LOOP_TIMED("serviceFrameRateLog", serviceFrameRateLog(millis()));
     LOOP_TIMED("servicePageSnapshots", servicePageSnapshots(millis()));
+    if (settingsGearPending) {
+      settingsGearPending = false;
+      openSettingsFromGear();
+    }
+    if (settingsClosePending) {
+      settingsClosePending = false;
+      closeSettingsPage();
+    }
     if (pageFlickPending) {
       int target = (int)currentPage + pageFlickPending;
       pageFlickPending = 0;
