@@ -4137,6 +4137,9 @@
   gap:9px;
   margin-top:14px;
 }
+.haEntitySearch{display:grid;gap:6px;margin-top:14px}
+.haEntitySearch[hidden]{display:none}
+.haEntitySearch input{width:100%;box-sizing:border-box}
 .homebridgeAccessoryRow{
   display:flex;
   align-items:center;
@@ -5729,6 +5732,10 @@
                 <button class="pageActionBtn" id="haSettingsBtn" type="button">Settings</button>
               </div>
               <div class="homebridgeConnectionStatus" id="haWizardStatus">Checking the saved Home Assistant connection…</div>
+              <div class="haEntitySearch" id="haEntitySearchRow" hidden>
+                <input class="textInput" id="haEntitySearch" type="search" placeholder="Search by name or entity ID" aria-label="Search Home Assistant entities" autocomplete="off" spellcheck="false">
+                <div class="settingHint" id="haEntitySearchCount" aria-live="polite"></div>
+              </div>
               <div class="homebridgeAccessoryList" id="haEntityList" hidden></div>
             </div>
 
@@ -9001,11 +9008,61 @@
     });
   }
 
+  /* ---- search ----
+     Every word typed must appear in the entity's name or ID, in any order, and
+     punctuation is ignored, so "den vol" finds media_player.den_receiver's
+     volume. Rows are only hidden, so ticks survive a change of search. */
+  function haEntityMatches(entity,query){
+    var compact=function(text){ return text.replace(/[\s_.,:;'"()\/\\-]+/g,""); };
+    var hay=(String(entity.name || "")+" "+String(entity.entityId || "")).toLowerCase();
+    var hayCompact=compact(hay);
+    return String(query || "").toLowerCase().split(/\s+/).every(function(term){
+      var termCompact=compact(term);
+      return !termCompact || hay.indexOf(term)>-1 || hayCompact.indexOf(termCompact)>-1;
+    });
+  }
+
+  function filterHomeAssistantEntities(){
+    var input=document.getElementById("haEntitySearch");
+    var count=document.getElementById("haEntitySearchCount");
+    var query=input ? input.value.trim() : "";
+    var shown=0, hiddenTicked=0;
+    document.querySelectorAll('#haEntityList input[type="checkbox"]').forEach(function(box){
+      var entity=haDiscoveredEntities[Number(box.getAttribute("data-ha-index"))];
+      var match=!!entity && haEntityMatches(entity,query);
+      var row=box.closest(".homebridgeAccessoryRow");
+      if(row) row.style.display=match ? "" : "none";
+      if(match) shown++;
+      else if(box.checked) hiddenTicked++;
+    });
+    if(!count) return;
+    var text="";
+    if(query){
+      text=shown ? shown+" of "+haDiscoveredEntities.length+" shown" : "No entity matches that search";
+      if(hiddenTicked) text+=" \u00b7 "+hiddenTicked+" ticked but hidden";
+    }
+    count.textContent=text;
+  }
+
+  function resetHomeAssistantSearch(visible){
+    var row=document.getElementById("haEntitySearchRow");
+    var input=document.getElementById("haEntitySearch");
+    if(input) input.value="";
+    if(row) row.hidden=!visible;
+    filterHomeAssistantEntities();
+  }
+
+  (function(){
+    var input=document.getElementById("haEntitySearch");
+    if(input) input.addEventListener("input",filterHomeAssistantEntities,false);
+  })();
+
   /* ---- wizard ---- */
   function prepareHomeAssistantWizard(){
     var list=document.getElementById("haEntityList");
     if(list){ list.innerHTML=""; list.hidden=true; }
     haDiscoveredEntities=[];
+    resetHomeAssistantSearch(false);
     var status=document.getElementById("haWizardStatus");
     if(status) status.textContent="Checking the saved Home Assistant connection…";
     loadHomeAssistantStatus().catch(function(error){
@@ -9052,6 +9109,7 @@
         });
         list.hidden=!haDiscoveredEntities.length;
       }
+      resetHomeAssistantSearch(haDiscoveredEntities.length>0);
       if(status){
         status.textContent=haDiscoveredEntities.length
           ? "Found "+haDiscoveredEntities.length+" controllable entities out of "+data.total+
