@@ -3415,6 +3415,10 @@
 .wgNpArtBig{width:calc(80px * var(--wgScale));height:calc(80px * var(--wgScale));align-self:center}
 .wgNpRows4 .wgNpArtBig{width:calc(56px * var(--wgScale));height:calc(56px * var(--wgScale))}
 .wgNpCenter{text-align:center}
+.wgNpNoArt .wgNpText{text-align:center}
+.wgNpNoArt .wgNpTitle{font-size:1.18em}
+.wgNpNoArt.wgNpFull .wgNpTitle{font-size:1.3em;margin-top:14px}
+.wgNpNoArt.wgNpFull .wgNpTitle+.wgSource{margin-bottom:14px}
 .wgNpKeys{display:flex;gap:calc(5px * var(--wgScale))}
 .wgNpKeys i{flex:1 1 0;font-style:normal;text-align:center;background:rgba(36,48,63,.9);border-radius:calc(6px * var(--wgScale));
   font-size:calc(10px * var(--wgScale));padding:calc(5px * var(--wgScale)) 0;color:#c9d4e0}
@@ -6228,7 +6232,7 @@
             <label class="switch"><input type="checkbox" id="widgetNowPlayingPopup" checked><span></span></label>
           </div>
           <div class="settingRow">
-            <div><div class="settingName">Download artwork</div><div class="settingHint">The player's picture, fetched through Home Assistant and cached on the remote's SD card. A Roku reports its app's icon; an Apple TV reports the poster.</div></div>
+            <div><div class="settingName">Show artwork</div><div class="settingHint">The player's picture, fetched through Home Assistant and cached on the remote's SD card. A Roku reports its app's icon; an Apple TV reports the poster. Off: no picture or placeholder, and the title and artist are centred in larger type.</div></div>
             <label class="switch"><input type="checkbox" id="widgetNowPlayingArtwork" checked><span></span></label>
           </div>
         </div>
@@ -7521,7 +7525,9 @@
     var volumeDetail=setup.hideAudioLabel ? "" : sameEntry ? "Sound mode" : "Input &middot; Sound mode";
     var level=escapeWidgetText(nowPlayingVolumeSample(setup));
     var rows=data && data.rows ? data.rows : (data && data.slim ? 1 : 2);
-    var cls='wgTile wgNowPlaying wgNpRows'+rows+tileClass;
+    var showArt=setup.artwork!==false;
+    var rxKey=setup.allowInput ? "Inputs" : "Sound";
+    var cls='wgTile wgNowPlaying wgNpRows'+rows+(showArt ? '' : ' wgNpNoArt')+tileClass;
     if(!hasMedia && !hasVolume){
       return '<div class="'+cls+' wgNpEmpty"'+style+'><div class="wgTitle">Now Playing</div>'+
         '<div class="wgSource">Choose the players below</div></div>';
@@ -7531,7 +7537,7 @@
       '<b class="wgNpLevel">'+level+'</b></div>';
     if(rows===1){
       return '<div class="'+cls+' wgNpSlim"'+style+'>'+
-        (hasMedia ? '<div class="wgNpArt wgNpArtSmall"></div><div class="wgNpText"><div class="wgNpTitle">Title</div><div class="wgSource">'+mediaName+'</div></div>'
+        (hasMedia ? (showArt ? '<div class="wgNpArt wgNpArtSmall"></div>' : '')+'<div class="wgNpText"><div class="wgNpTitle">Title</div><div class="wgSource">'+mediaName+'</div></div>'
                   : '<span class="wgNpIcon">&#128266;</span><div class="wgNpText"><div class="wgNpTitle">'+volumeName+'</div><div class="wgSource">Input</div></div>')+
         (hasVolume ? '<b class="wgNpLevel">'+level+'</b>' : '')+'</div>';
     }
@@ -7541,16 +7547,16 @@
     var progress='<div class="wgNpProgress"><span>18:22</span><div class="wgBar"><i style="width:38%"></i></div><span>-30:41</span></div>';
     if(rows>=4){
       return '<div class="'+cls+' wgNpFull"'+style+'>'+
-        '<div class="wgSource">'+mediaName+'</div>'+
-        '<div class="wgNpArt wgNpArtBig"></div>'+
-        '<div class="wgNpTitle wgNpCenter">Title</div><div class="wgSource wgNpCenter">App &middot; S1 E1</div>'+progress+
+        '<div class="wgSource">'+mediaName+(sameEntry ? ' &middot; Input' : '')+'</div>'+
+        (showArt ? '<div class="wgNpArt wgNpArtBig"></div>' : '')+
+        '<div class="wgNpTitle wgNpCenter">Title</div><div class="wgSource wgNpCenter">'+(sameEntry ? 'Artist &middot; Album' : 'App &middot; S1 E1')+'</div>'+progress+
         '<div class="wgNpKeys wgNpTransport"><i>&#9664;&#9664;</i><i class="wgNpPlay">&#9654;</i><i>&#9654;&#9654;</i></div>'+
         (hasVolume ? '<div class="wgNpVolRow"><span class="wgNpIcon">&#128266;</span><span class="wgNpVolText">'+[volumeName,volumeDetail].filter(Boolean).join(" &middot; ")+'</span><b>'+level+'</b></div>'+
-          '<div class="wgNpKeys"><i>&minus;</i><i>Mute</i><i>+</i><i>Receiver</i></div>' : '')+
+          '<div class="wgNpKeys"><i>&minus;</i><i>Mute</i><i>+</i><i>'+rxKey+'</i></div>' : '')+
       '</div>';
     }
     return '<div class="'+cls+(hasVolume ? '' : ' wgNpNoVolume')+'"'+style+'>'+
-      '<div class="wgNpMedia"><div class="wgNpArt"></div><div class="wgNpText">'+
+      '<div class="wgNpMedia">'+(showArt ? '<div class="wgNpArt"></div>' : '')+'<div class="wgNpText">'+
         '<div class="wgNpTitle">Title</div><div class="wgSource">'+mediaName+' &middot; Playing</div>'+progress+'</div></div>'+
       (hasVolume ? volumeBlock : '')+
     '</div>';
