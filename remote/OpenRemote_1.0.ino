@@ -39235,6 +39235,28 @@ int activitySliderCardPixels(uint8_t thumbSize) {
   return max(44, (int)thumbSize + 6);
 }
 
+// An activity card's name, always on one line. A name too wide for the space
+// between the icon and the chevrons steps down in size (not below 14 pt), and
+// only then ends in dots. LVGL's dot mode needs a fixed height: with the width
+// alone set, a long name wraps onto the "Slide to activate" line.
+lv_obj_t *makeActivityNameLabel(lv_obj_t *card, const char *text, int x, int y) {
+  int width = max(72, 189 - x);   // the chevrons start at x = 193
+  const lv_font_t *wanted = fontForSize(activityTextSize);
+  const lv_font_t *font = wanted;
+  for (int size = activityTextSize; ; size -= 2) {
+    font = fontForSize(size);
+    lv_point_t extent;
+    lv_txt_get_size(&extent, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (extent.x <= width || size <= 14) break;
+  }
+  // Keep the baseline where the chosen size would have put it.
+  y += (wanted->line_height - wanted->base_line) - (font->line_height - font->base_line);
+  lv_obj_t *name = makeLabel(card, text, x, y, font, textPrimary());
+  lv_obj_set_size(name, width, font->line_height);
+  lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+  return name;
+}
+
 // Highest row index actually populated on the remote page being built, +1.
 // Reset by renderActivityPage()/renderDevicePage(), raised by each tile.
 // finaliseRemotePageScrolling() needs it to pick the right calibration entry.
@@ -39649,10 +39671,7 @@ void renderActivitiesPage() {
 
     int textX = thumbSize + 14;
     int nameY = max(3, (cardHeight - 36) / 2);
-    lv_obj_t *name = makeLabel(card, activities[i].name, textX, nameY,
-                               fontForSize(activityTextSize), textPrimary());
-    lv_obj_set_width(name, max(72, 185 - textX));
-    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_t *name = makeActivityNameLabel(card, activities[i].name, textX, nameY);
     lv_obj_clear_flag(name, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_t *instruction = makeLabel(card, "Slide to activate", textX, nameY + 22,
                                         &lv_font_montserrat_12, textSecondary());
@@ -39807,10 +39826,7 @@ void makeNestedActivitySlider(const Tile &tile, uint8_t targetActivityIndex,
   if (tile.showText) {
     int textX = thumbSize + 14;
     int nameY = max(3, (cardHeight - 36) / 2);
-    lv_obj_t *name = makeLabel(card, tile.label, textX, nameY,
-                               fontForSize(activityTextSize), textPrimary());
-    lv_obj_set_width(name, max(72, 185 - textX));
-    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_t *name = makeActivityNameLabel(card, tile.label, textX, nameY);
     lv_obj_clear_flag(name, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_t *instruction = makeLabel(card, "Slide to activate", textX, nameY + 22,
                                         &lv_font_montserrat_12, textSecondary());
