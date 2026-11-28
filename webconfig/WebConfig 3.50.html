@@ -10003,6 +10003,7 @@
       if(status.clockCity){
         selectedCity=status.clockCity;
         if(cityInput) cityInput.value=selectedCity;
+        if(cityLabel) cityLabel.textContent=selectedCity;
       }
       if(status.clockUtcOffsetMinutes!==undefined) selectedUtcOffsetMinutes=Number(status.clockUtcOffsetMinutes)||0;
       if(status.manualClockEpoch){
