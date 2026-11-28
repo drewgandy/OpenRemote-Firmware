@@ -9486,6 +9486,11 @@ uint64_t manualClockEpoch = 0;
 RTC_DATA_ATTR bool rtcWallClockTrusted = false;
 bool wallClockTrusted = false;
 int16_t clockUtcOffsetMinutes = 600;
+// The city's POSIX TZ rule, with its daylight saving dates, and the IANA zone
+// it came from. Both empty for a city saved before they existed, which then
+// keeps the fixed offset above. See setClockZone().
+String clockTzRule;
+String clockTimeZoneName;
 char irdbBuildDate[28] = "Not installed";
 uint32_t irdbDeviceCount = 0;
 String clockCityName = "Canberra";
@@ -10029,6 +10034,9 @@ struct WebClockRequest {
   uint64_t manualEpoch = 0;
   int16_t utcOffsetMinutes = 600;
   char city[64] = {};
+  bool hasTzRule = false;
+  char tzRule[48] = {};
+  char timeZone[48] = {};
 };
 
 portMUX_TYPE webControlMux = portMUX_INITIALIZER_UNLOCKED;
@@ -14061,6 +14069,8 @@ void loadSettings() {
   clockCityName = preferences.getString("city", "Canberra");
   clockUtcOffsetMinutes = constrain(
     (int)preferences.getShort("utcOffset", 600), -12 * 60, 14 * 60);
+  clockTzRule = preferences.getString("tzRule", "");
+  clockTimeZoneName = preferences.getString("tzName", "");
   selectedWifiSsid = preferences.getString("ssid", "");
   String legacyWifiPassword = preferences.getString("pass", "");
   wifiProfileCount = min((uint8_t)preferences.getUChar("wifiCnt", 0),
@@ -14230,6 +14240,8 @@ void saveSettings() {
   preferences.putULong64("manualTs", manualClockEpoch);
   preferences.putString("city", clockCityName);
   preferences.putShort("utcOffset", clockUtcOffsetMinutes);
+  preferences.putString("tzRule", clockTzRule);
+  preferences.putString("tzName", clockTimeZoneName);
   preferences.putString("remoteName", remoteName);
   // Written here as well as from their own dropdowns. applySettingsJson()
   // restores these from runtime.json and is followed by a saveSettings() call;
@@ -14314,7 +14326,46 @@ bool ensureStationConnected(uint32_t timeoutMs = 15000UL) {
   return WiFi.status() == WL_CONNECTED;
 }
 
+// A POSIX TZ rule that fits the dock packet and uses only the characters one can.
+bool validClockTzRule(const char *rule) {
+  size_t length = rule ? strlen(rule) : 0;
+  if (length < 4 || length >= sizeof(((WebClockRequest *)0)->tzRule)) return false;
+  if (!isalpha((unsigned char)rule[0]) && rule[0] != '<') return false;
+  for (size_t i = 0; i < length; i++) {
+    if (!isalnum((unsigned char)rule[i]) && !strchr("<>+-:.,/", rule[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/*
+  Moves the clock to a city. A TZ rule belongs to the place it came with:
+
+  - a rule given (even an empty or unusable one) replaces the saved rule;
+  - no rule given, same city and offset: the saved rule stays, so an older
+    WebConfig or backup cannot strip daylight saving from an unchanged city;
+  - no rule given, anything moved: the saved rule goes, and the new offset is
+    used as it is.
+*/
+void setClockZone(const char *city, int offsetMinutes, const char *rule,
+                  const char *zone) {
+  offsetMinutes = constrain(offsetMinutes, -12 * 60, 14 * 60);
+  bool moved = clockCityName != city || clockUtcOffsetMinutes != offsetMinutes;
+  if (rule) {
+    bool usable = validClockTzRule(rule);
+    clockTzRule = usable ? rule : "";
+    clockTimeZoneName = usable && zone ? zone : "";
+  } else if (moved) {
+    clockTzRule = "";
+    clockTimeZoneName = "";
+  }
+  clockCityName = city;
+  clockUtcOffsetMinutes = offsetMinutes;
+}
+
 String clockTimezoneRule() {
+  if (clockTzRule.length()) return clockTzRule;
   if (clockUtcOffsetMinutes == 600 &&
       (clockCityName == "Canberra" || clockCityName == "Sydney" ||
        clockCityName == "Melbourne")) {
@@ -16829,6 +16880,8 @@ String buildStatusJson() {
   doc["clock24Hour"] = clock24Hour;
   doc["clockCity"] = clockCityName;
   doc["clockUtcOffsetMinutes"] = clockUtcOffsetMinutes;
+  doc["clockTzRule"] = clockTzRule;
+  doc["clockTimeZone"] = clockTimeZoneName;
   doc["manualClockEpoch"] = manualClockEpoch;
   time_t statusEpoch = time(nullptr);
   bool statusTimeValid = statusEpoch > 1700000000;
@@ -16940,6 +16993,15 @@ void handleClockSettingsApi() {
     -12 * 60, 14 * 60);
   const char *city = doc["clockCity"] | clockCityName.c_str();
   strlcpy(request.city, city && city[0] ? city : "UTC", sizeof(request.city));
+  const char *tzRule = doc["clockTzRule"].as<const char *>();
+  if (tzRule) {
+    request.hasTzRule = true;
+    // One too long to hold is dropped rather than cut short.
+    if (validClockTzRule(tzRule)) {
+      strlcpy(request.tzRule, tzRule, sizeof(request.tzRule));
+    }
+    strlcpy(request.timeZone, doc["clockTimeZone"] | "", sizeof(request.timeZone));
+  }
   uint64_t manualEpoch = doc["manualClockEpoch"] | (uint64_t)0;
   request.hasManualEpoch = manualEpoch > 0;
   request.manualEpoch = manualEpoch;
@@ -17253,10 +17315,12 @@ void applySettingsJson(JsonVariantConst settings) {
   clockUseInternetTime = settings["clockUseInternetTime"] | clockUseInternetTime;
   clock24Hour = settings["clock24Hour"] | clock24Hour;
   const char *city = settings["clockCity"].as<const char *>();
-  if (city && city[0]) clockCityName = city;
-  clockUtcOffsetMinutes = constrain(
-    (int)(settings["clockUtcOffsetMinutes"] | clockUtcOffsetMinutes),
-    -12 * 60, 14 * 60);
+  // A copy: setClockZone() writes clockCityName while it reads the city.
+  String newCity = city && city[0] ? String(city) : clockCityName;
+  setClockZone(newCity.c_str(),
+               (int)(settings["clockUtcOffsetMinutes"] | clockUtcOffsetMinutes),
+               settings["clockTzRule"].as<const char *>(),
+               settings["clockTimeZone"].as<const char *>());
   uint64_t configuredManualEpoch = settings["manualClockEpoch"] | (uint64_t)0;
   if (configuredManualEpoch > 0) manualClockEpoch = configuredManualEpoch;
   wakeMode = constrain((int)(settings["wakeMode"] | wakeMode),
@@ -20973,6 +21037,8 @@ bool persistSettingsToRuntimeConfig() {
   settings["clockCity"] = clockCityName;
   settings["city"] = clockCityName;
   settings["clockUtcOffsetMinutes"] = clockUtcOffsetMinutes;
+  settings["clockTzRule"] = clockTzRule;
+  settings["clockTimeZone"] = clockTimeZoneName;
   settings["manualClockEpoch"] = manualClockEpoch;
   settings["brightness"] = brightness;
   settings["sleepSeconds"] = timeoutSeconds;
@@ -36238,8 +36304,9 @@ void serviceWebControlRequests(unsigned long now) {
     clockEnabled = clockRequest.enabled;
     clockUseInternetTime = clockRequest.useInternetTime;
     clock24Hour = clockRequest.use24Hour;
-    clockUtcOffsetMinutes = clockRequest.utcOffsetMinutes;
-    clockCityName = clockRequest.city;
+    setClockZone(clockRequest.city, clockRequest.utcOffsetMinutes,
+                 clockRequest.hasTzRule ? clockRequest.tzRule : nullptr,
+                 clockRequest.timeZone);
     if (!clockUseInternetTime && clockRequest.hasManualEpoch) {
       manualClockEpoch = clockRequest.manualEpoch;
     }
@@ -36248,6 +36315,7 @@ void serviceWebControlRequests(unsigned long now) {
     scheduleRuntimeSettingsSave();
     if (clockUseInternetTime) requestInternetTimeSync();
     pendingUiRefresh = true;
+    Serial.printf("Clock zone rule: %s\n", clockTimezoneRule().c_str());
     Serial.printf("WebConfig Clock: %s, %s, %s, %s, UTC offset %+d min\n",
                   clockEnabled ? "visible" : "hidden",
                   clockUseInternetTime ? "Internet" : "manual",
@@ -36851,7 +36919,7 @@ void setManualClockEvent(lv_event_t *e) {
   manual.tm_min = lv_roller_get_selected(clockRollers[5]);
   manual.tm_sec = 0;
   manual.tm_isdst = -1;
-  setenv("TZ", OPENREMOTE_TZ, 1);
+  setenv("TZ", clockTimezoneRule().c_str(), 1);
   tzset();
   time_t epoch = mktime(&manual);
   if (epoch > 0) {
@@ -36864,10 +36932,31 @@ void setManualClockEvent(lv_event_t *e) {
   }
 }
 
+struct ClockCityChoice {
+  const char *city;
+  int16_t offsetMinutes;
+  const char *rule;
+  const char *zone;
+};
+
+// The on-remote city list. Offsets are standard time; the rule adds the rest.
+static const ClockCityChoice CLOCK_CITIES[] = {
+  {"Canberra", 600, "AEST-10AEDT,M10.1.0,M4.1.0/3", "Australia/Sydney"},
+  {"Sydney", 600, "AEST-10AEDT,M10.1.0,M4.1.0/3", "Australia/Sydney"},
+  {"Melbourne", 600, "AEST-10AEDT,M10.1.0,M4.1.0/3", "Australia/Melbourne"},
+  {"Brisbane", 600, "AEST-10", "Australia/Brisbane"},
+  {"Perth", 480, "AWST-8", "Australia/Perth"},
+  {"Adelaide", 570, "ACST-9:30ACDT,M10.1.0,M4.1.0/3", "Australia/Adelaide"},
+  {"Darwin", 570, "ACST-9:30", "Australia/Darwin"},
+  {"Hobart", 600, "AEST-10AEDT,M10.1.0,M4.1.0/3", "Australia/Hobart"},
+  {"UTC", 0, "UTC0", "Etc/UTC"}
+};
+
 void chooseClockCity(lv_event_t *e) {
-  const char *city = (const char *)lv_event_get_user_data(e);
-  if (!city || !wifiOn || !hasSelectedWifiProfile()) return;
-  clockCityName = city;
+  const ClockCityChoice *choice =
+    (const ClockCityChoice *)lv_event_get_user_data(e);
+  if (!choice || !wifiOn || !hasSelectedWifiProfile()) return;
+  setClockZone(choice->city, choice->offsetMinutes, choice->rule, choice->zone);
   clockUseInternetTime = true;
   saveSettings();
   scheduleRuntimeSettingsSave();
@@ -36882,14 +36971,12 @@ void renderClockCityPageOmote() {
               &lv_font_montserrat_12, textPrimary());
     return;
   }
-  static const char *cities[] = {
-    "Canberra", "Sydney", "Melbourne", "Brisbane", "Perth",
-    "Adelaide", "Darwin", "Hobart", "UTC"
-  };
   makeLabel(content, "Select nearest city", 8, 4, &lv_font_montserrat_12, textPrimary());
-  for (uint8_t i = 0; i < sizeof(cities) / sizeof(cities[0]); i++) {
-    lv_obj_t *city = makeOmoteButton(content, cities[i], 8, 34 + i * 40, 224, 36);
-    lv_obj_add_event_cb(city, chooseClockCity, LV_EVENT_CLICKED, (void *)cities[i]);
+  for (uint8_t i = 0; i < sizeof(CLOCK_CITIES) / sizeof(CLOCK_CITIES[0]); i++) {
+    lv_obj_t *city = makeOmoteButton(content, CLOCK_CITIES[i].city, 8, 34 + i * 40,
+                                     224, 36);
+    lv_obj_add_event_cb(city, chooseClockCity, LV_EVENT_CLICKED,
+                        (void *)&CLOCK_CITIES[i]);
   }
 }
 
