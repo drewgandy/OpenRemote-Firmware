@@ -46,14 +46,18 @@
 #define LV_USE_SNAPSHOT 1
 #define LV_IMG_CACHE_DEF_SIZE 1
 
-#define LV_FONT_MONTSERRAT_10 1
-#define LV_FONT_MONTSERRAT_12 1
-#define LV_FONT_MONTSERRAT_14 1
-#define LV_FONT_MONTSERRAT_16 1
-#define LV_FONT_MONTSERRAT_18 1
-#define LV_FONT_MONTSERRAT_20 1
-#define LV_FONT_MONTSERRAT_22 1
-#define LV_FONT_MONTSERRAT_24 1
+// 10-24 come from lv_font_montserrat_NN_latin.c in this folder: the same
+// faces and symbols as LVGL's, plus accented Latin letters, curly quotes and
+// dashes for track titles and artists. LVGL's own copies are switched off.
+#define LV_FONT_MONTSERRAT_10 0
+#define LV_FONT_MONTSERRAT_12 0
+#define LV_FONT_MONTSERRAT_14 0
+#define LV_FONT_MONTSERRAT_16 0
+#define LV_FONT_MONTSERRAT_18 0
+#define LV_FONT_MONTSERRAT_20 0
+#define LV_FONT_MONTSERRAT_22 0
+#define LV_FONT_MONTSERRAT_24 0
+#define LV_FONT_CUSTOM_DECLARE LV_FONT_DECLARE(lv_font_montserrat_10) LV_FONT_DECLARE(lv_font_montserrat_12) LV_FONT_DECLARE(lv_font_montserrat_14) LV_FONT_DECLARE(lv_font_montserrat_16) LV_FONT_DECLARE(lv_font_montserrat_18) LV_FONT_DECLARE(lv_font_montserrat_20) LV_FONT_DECLARE(lv_font_montserrat_22) LV_FONT_DECLARE(lv_font_montserrat_24)
 // 48 is the hero glyph size for the pairing overlay's Bluetooth rune and
 // its success tick. The built-in Montserrat faces carry the FontAwesome
 // symbol range, so LV_SYMBOL_BLUETOOTH and LV_SYMBOL_OK come with it.

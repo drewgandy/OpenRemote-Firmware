@@ -460,8 +460,62 @@ void npFormatVolume(char *out, size_t size, const NpEntityState &s) {
   }
 }
 
+/*
+  Copies player text for the faces. The widget's Montserrat faces carry
+  Latin-1, Latin Extended-A, curly quotes, dashes, the ellipsis and the euro
+  sign (lv_font_montserrat_NN_latin.c), so those stay as they are - "LÉON"
+  rather than "L?ON". Anything else goes through copyDisplayTextAscii(), which
+  folds what it can and marks the rest with "?". A character is never split
+  when the destination fills up.
+*/
 static void npCopyText(const char *source, char *destination, size_t size) {
-  copyDisplayTextAscii(source ? source : "", destination, size);
+  if (!destination || !size) return;
+  destination[0] = '\0';
+  if (!source) return;
+  size_t out = 0;
+  const uint8_t *p = (const uint8_t *)source;
+  while (*p && out + 1 < size) {
+    size_t length = 1;
+    bool keep = false;
+    if (*p < 0x80) {
+      keep = *p >= 0x20;
+    } else if ((p[0] == 0xC2 && p[1] >= 0xA1 && p[1] <= 0xBF) || p[0] == 0xC3 ||
+               (p[0] == 0xC4 && p[1] >= 0x80 && p[1] <= 0xBF) ||
+               (p[0] == 0xC5 && p[1] >= 0x80 && p[1] <= 0xBF)) {
+      length = 2;
+      keep = (p[1] & 0xC0) == 0x80;
+    } else if (p[0] == 0xE2 && p[1] == 0x80 && p[2] &&
+               ((p[2] >= 0x93 && p[2] <= 0x94) || (p[2] >= 0x98 && p[2] <= 0x9E) ||
+                p[2] == 0xA2 || p[2] == 0xA6)) {
+      length = 3;
+      keep = true;
+    } else if (p[0] == 0xE2 && p[1] == 0x82 && p[2] == 0xAC) {
+      length = 3;
+      keep = true;
+    }
+    if (keep) {
+      if (out + length >= size) break;
+      memcpy(destination + out, p, length);
+      out += length;
+      p += length;
+      continue;
+    }
+    // One character the faces can't draw: fold it on its own.
+    size_t span = 1;
+    if ((*p & 0xE0) == 0xC0) span = 2;
+    else if ((*p & 0xF0) == 0xE0) span = 3;
+    else if ((*p & 0xF8) == 0xF0) span = 4;
+    char one[5] = {0};
+    for (size_t i = 0; i < span && p[i]; i++) one[i] = (char)p[i];
+    char folded[8];
+    copyDisplayTextAscii(one, folded, sizeof(folded));
+    size_t foldedLength = strlen(folded);
+    if (out + foldedLength >= size) break;
+    memcpy(destination + out, folded, foldedLength);
+    out += foldedLength;
+    for (size_t i = 0; i < span && *p; i++) p++;
+  }
+  destination[out] = '\0';
 }
 
 /* --------------------------------------------------------- state reads */
@@ -509,7 +563,9 @@ bool npReadHa(NpEntityState &s, const char *entityId) {
   strlcpy(next.entity, entityId, sizeof(next.entity));
   strlcpy(next.state, doc["state"] | "unknown", sizeof(next.state));
   npCopyText(attrs["friendly_name"] | entityId, next.friendly, sizeof(next.friendly));
-  npCopyText(attrs["app_name"] | (attrs["source"] | ""), next.app, sizeof(next.app));
+  // The app only when the player names one. A receiver's input ("NETWORK")
+  // is its source, shown beside its name, not in front of the artist.
+  npCopyText(attrs["app_name"] | "", next.app, sizeof(next.app));
   npCopyText(attrs["source"] | "", next.source, sizeof(next.source));
   // The processing mode as the receiver names it ("DOLBY ATMOS") when the
   // integration offers it, otherwise the selectable mode.
@@ -1954,7 +2010,9 @@ static void npBuildVolumeRow(NowPlayingUi *ui, lv_obj_t *panel, int width, int y
   npKey(ui->volKeys, x, 0, keyW, 24, LV_SYMBOL_PLUS, &lv_font_montserrat_12, NP_ACT_VOLUME_UP);
   x += keyW + 6;
   if (receiver) {
-    ui->receiverBtn = npKey(ui->volKeys, x, 0, width - 12 - x, 24, "Receiver " LV_SYMBOL_RIGHT,
+    ui->receiverBtn = npKey(ui->volKeys, x, 0, width - 12 - x, 24,
+                            npSettings.allowInput ? "Inputs " LV_SYMBOL_RIGHT
+                                                  : "Sound " LV_SYMBOL_RIGHT,
                             &lv_font_montserrat_10, NP_ACT_SHOW_RECEIVER);
   }
   ui->volPowerBtn = npKey(panel, 12, y + 24, width - 24, 24, LV_SYMBOL_POWER " Turn on",
@@ -1994,7 +2052,28 @@ static void npReflow(NowPlayingUi *ui, bool art, bool timed) {
   const int w = ui->width;
   const int mediaH = lv_obj_get_height(ui->mediaPanel);
   const int progressH = timed ? 15 : 0;
-  const int blockH = f.titleH + f.lineH + progressH;
+  /*
+    "Show artwork" off: the text is centred and a size larger, where the
+    panel has the height for it (two rows with a progress bar does not).
+  */
+  const bool plain = !npSettings.artwork;
+  const lv_font_t *titleFont = f.title;
+  const lv_font_t *lineFont = f.line;
+  int titleH = f.titleH, lineH = f.lineH;
+  if (plain) {
+    bool roomy = ui->layout == NP_LAYOUT_THREE || !ui->hasVolume;
+    const lv_font_t *bigTitle = roomy ? &lv_font_montserrat_22 : &lv_font_montserrat_18;
+    const lv_font_t *bigLine = roomy ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
+    int bigTitleH = roomy ? 27 : 22, bigLineH = roomy ? 20 : 17;
+    if (bigTitleH + bigLineH + progressH <= mediaH - 4) {
+      titleFont = bigTitle; lineFont = bigLine; titleH = bigTitleH; lineH = bigLineH;
+    }
+  }
+  lv_obj_set_style_text_font(ui->title, titleFont, 0);
+  lv_obj_set_style_text_font(ui->subtitle, lineFont, 0);
+  lv_obj_set_style_text_align(ui->title, plain ? LV_TEXT_ALIGN_CENTER : LV_TEXT_ALIGN_LEFT, 0);
+  lv_obj_set_style_text_align(ui->subtitle, plain ? LV_TEXT_ALIGN_CENTER : LV_TEXT_ALIGN_LEFT, 0);
+  const int blockH = titleH + lineH + progressH;
   int artSize = timed ? f.artTimed : f.art;
   // Media only: the artwork can grow, but not past the 96px it is stored at.
   if (!ui->hasVolume) artSize = min(mediaH - 16, min((int)NP_ART_SIZE, artSize * 2));
@@ -2011,11 +2090,11 @@ static void npReflow(NowPlayingUi *ui, bool art, bool timed) {
   int textY = art ? (mediaH - blockH) / 2 : top;
   lv_obj_set_pos(ui->title, textX, textY);
   lv_obj_set_width(ui->title, textW);
-  lv_obj_set_pos(ui->subtitle, textX, textY + f.titleH);
+  lv_obj_set_pos(ui->subtitle, textX, textY + titleH);
   lv_obj_set_width(ui->subtitle, textW);
   if (timed) {
     // On one line: elapsed, the bar, remaining.
-    int rowY = textY + f.titleH + f.lineH + 1;
+    int rowY = textY + titleH + lineH + 1;
     lv_obj_set_pos(ui->left, textX, rowY);
     lv_obj_set_pos(ui->right, textX + textW - 40, rowY);
     ui->trackWidth = (int16_t)(textW - 84);
@@ -2027,7 +2106,7 @@ static void npReflow(NowPlayingUi *ui, bool art, bool timed) {
 static void npBuildMediaText(NowPlayingUi *ui, lv_obj_t *panel) {
   const lv_color_t muted = widgetMutedColour();
   const NpFlowMetrics f = npFlowMetrics(ui);
-  npBuildArt(ui, panel, 10, 6, f.art);
+  if (npSettings.artwork) npBuildArt(ui, panel, 10, 6, f.art);
   ui->title = npScrollingLabel(panel, 10, 8, ui->width - 20, f.title, textPrimary(),
                                LV_TEXT_ALIGN_LEFT);
   ui->subtitle = makeWidgetLabel(panel, "", 10, 29, f.line, muted, ui->width - 20);
@@ -2065,6 +2144,29 @@ static void npBuildVolumeBlock(NowPlayingUi *ui, lv_obj_t *parent, int y, int h,
   transport keys and volume keys included - at four or five rows and in the
   expanded view.
 */
+/*
+  The full face with "Show artwork" off: title and artist/album centred, a
+  size larger, in the space the artwork had. The second line wraps to two
+  lines so artist and album both fit.
+*/
+static void npBuildPlainText(NowPlayingUi *ui, lv_obj_t *panel, int width, int top, int height,
+                             bool stacked) {
+  const lv_font_t *titleFont = stacked ? &lv_font_montserrat_22 : &lv_font_montserrat_20;
+  const int titleH = stacked ? 27 : 24;
+  const int lineH = 17;                       // montserrat 14
+  const int lines = height >= titleH + 4 + lineH * 2 ? 2 : 1;
+  const int blockH = titleH + 4 + lineH * lines;
+  int y = top + max(0, (height - blockH) / 2);
+  ui->title = npScrollingLabel(panel, 12, y, width - 24, titleFont, textPrimary(),
+                               LV_TEXT_ALIGN_CENTER);
+  ui->subtitle = makeWidgetLabel(panel, "", 12, y + titleH + 4, &lv_font_montserrat_14,
+                                 widgetMutedColour(), width - 24, LV_TEXT_ALIGN_CENTER);
+  if (lines == 2) {
+    lv_label_set_long_mode(ui->subtitle, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(ui->subtitle, lineH * 2);
+  }
+}
+
 NowPlayingUi *buildNowPlayingFace(lv_obj_t *parent, int width, int height, bool expanded,
                                   bool slim, uint8_t setup) {
   if (!npUse(setup)) return nullptr;
@@ -2102,8 +2204,10 @@ NowPlayingUi *buildNowPlayingFace(lv_obj_t *parent, int width, int height, bool 
     // One row: artwork, title and app, the level on the right.
     int textX = 10;
     if (ui->hasMedia) {
-      npBuildArt(ui, parent, 6, 6, 32);
-      textX = 46;
+      if (npSettings.artwork) {
+        npBuildArt(ui, parent, 6, 6, 32);
+        textX = 46;
+      }
       int textW = width - textX - (ui->hasVolume ? 84 : 8);
       ui->title = npScrollingLabel(parent, textX, 5, textW, &lv_font_montserrat_14,
                                    textPrimary(), LV_TEXT_ALIGN_LEFT);
@@ -2153,12 +2257,16 @@ NowPlayingUi *buildNowPlayingFace(lv_obj_t *parent, int width, int height, bool 
     if (height >= 240) {
       // Stacked: artwork centred, title and progress under it.
       int art = height >= 264 ? NP_ART_SIZE : 80;
-      npBuildArt(ui, ui->mediaPanel, (width - art) / 2, 22, art);
       int y = 22 + art + 4;
-      ui->title = npScrollingLabel(ui->mediaPanel, 12, y, width - 24, &lv_font_montserrat_16,
-                                   textPrimary(), LV_TEXT_ALIGN_CENTER);
-      ui->subtitle = makeWidgetLabel(ui->mediaPanel, "", 12, y + 20, &lv_font_montserrat_12, muted,
-                                     width - 24, LV_TEXT_ALIGN_CENTER);
+      if (npSettings.artwork) {
+        npBuildArt(ui, ui->mediaPanel, (width - art) / 2, 22, art);
+        ui->title = npScrollingLabel(ui->mediaPanel, 12, y, width - 24, &lv_font_montserrat_16,
+                                     textPrimary(), LV_TEXT_ALIGN_CENTER);
+        ui->subtitle = makeWidgetLabel(ui->mediaPanel, "", 12, y + 20, &lv_font_montserrat_12,
+                                       muted, width - 24, LV_TEXT_ALIGN_CENTER);
+      } else {
+        npBuildPlainText(ui, ui->mediaPanel, width, 22, art + 4 + 38 - 6, true);
+      }
       y += 38;
       ui->trackWidth = (int16_t)(width - 32);
       ui->track = npTrack(ui->mediaPanel, 16, y, width - 32, 4, npAccent(), &ui->fill);
@@ -2171,11 +2279,15 @@ NowPlayingUi *buildNowPlayingFace(lv_obj_t *parent, int width, int height, bool 
     } else {
       // Side by side: artwork left of the title, to fit four rows.
       int art = 56;
-      npBuildArt(ui, ui->mediaPanel, 12, 22, art);
-      ui->title = npScrollingLabel(ui->mediaPanel, 12 + art + 10, 26, width - art - 34,
-                                   &lv_font_montserrat_16, textPrimary(), LV_TEXT_ALIGN_LEFT);
-      ui->subtitle = makeWidgetLabel(ui->mediaPanel, "", 12 + art + 10, 48, &lv_font_montserrat_12,
-                                     muted, width - art - 34);
+      if (npSettings.artwork) {
+        npBuildArt(ui, ui->mediaPanel, 12, 22, art);
+        ui->title = npScrollingLabel(ui->mediaPanel, 12 + art + 10, 26, width - art - 34,
+                                     &lv_font_montserrat_16, textPrimary(), LV_TEXT_ALIGN_LEFT);
+        ui->subtitle = makeWidgetLabel(ui->mediaPanel, "", 12 + art + 10, 48,
+                                       &lv_font_montserrat_12, muted, width - art - 34);
+      } else {
+        npBuildPlainText(ui, ui->mediaPanel, width, 22, art + 4, false);
+      }
       int y = 22 + art + 8;
       ui->trackWidth = (int16_t)(width - 32);
       ui->track = npTrack(ui->mediaPanel, 16, y, width - 32, 4, npAccent(), &ui->fill);
@@ -2258,14 +2370,9 @@ static void npRebuildReceiverLists(NowPlayingUi *ui) {
   int inner = ui->width - 24;
   int half = (inner - 6) / 2;
 
-  // A name too long for half the panel ("STEREO (Front 2 Speakers Only)")
-  // gets the whole width rather than being cut off; flex wrap puts it on a
-  // line of its own.
-  auto keyWidth = [&](const char *text) -> int {
-    lv_point_t size;
-    lv_txt_get_size(&size, text, &lv_font_montserrat_12, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    return size.x > half - 12 ? inner : half;
-  };
+  // One full-width button per input or sound mode, short or long.
+  (void)half;
+  auto keyWidth = [&](const char *) -> int { return inner; };
 
   auto heading = [&](const char *text) -> lv_obj_t * {
     lv_obj_t *label = makeWidgetLabel(ui->rxList, text, 0, 0, &lv_font_montserrat_10, muted, inner);
@@ -2377,22 +2484,23 @@ static void npMediaLines(const NpEntityState &m, char *title, size_t titleSize, 
     : off ? "Off" : npStateIs(m, "idle") ? "Idle"
     : npStateIs(m, "paused") ? "Paused"
     : npIsPlaying(m) ? "Playing" : "";
-  if (!m.valid || off || (!m.title[0] && !m.app[0])) {
+  const char *app = m.app[0] ? m.app : m.source;   // a bare input stands in for an app
+  if (!m.valid || off || (!m.title[0] && !app[0])) {
     strlcpy(title, name, titleSize);
     strlcpy(line, status, lineSize);
     return;
   }
   if (m.title[0]) {
     strlcpy(title, m.title, titleSize);
-    const char *who = m.app[0] ? m.app : (withPlayer ? name : "");
+    const char *who = m.app[0] ? m.app : (withPlayer && !m.source[0] ? name : "");
     const char *what = m.subtitle[0] ? m.subtitle : (npStateIs(m, "paused") ? "Paused" : "");
     snprintf(line, lineSize, "%s%s%s", who, who[0] && what[0] ? " - " : "", what);
     return;
   }
   // Only the app is known.
-  strlcpy(title, m.app, titleSize);
-  snprintf(line, lineSize, "%s%s%s", strcmp(m.app, name) ? name : "",
-           strcmp(m.app, name) && status[0] ? " - " : "", status);
+  strlcpy(title, app, titleSize);
+  snprintf(line, lineSize, "%s%s%s", strcmp(app, name) ? name : "",
+           strcmp(app, name) && status[0] ? " - " : "", status);
 }
 
 void refreshNowPlayingUi(NowPlayingUi *ui) {
@@ -2413,8 +2521,15 @@ void refreshNowPlayingUi(NowPlayingUi *ui) {
     if (full) {
       // The full face names the player above the artwork, so the line under
       // the title leaves it out.
+      // The full face names the player above the artwork, with its input
+      // when that isn't just the app again: "Deck Receiver - NETWORK".
       const char *name = npHalfName(npCurMedia, m, "Media player");
-      setWidgetLabelText(ui->tag, name);
+      if (m.valid && !off && m.source[0] && strcmp(m.source, m.app) && strcmp(m.source, name)) {
+        snprintf(text, sizeof(text), "%s - %s", name, m.source);
+        setWidgetLabelText(ui->tag, text);
+      } else {
+        setWidgetLabelText(ui->tag, name);
+      }
     }
     setWidgetLabelText(ui->subtitle, line);
 
@@ -2495,7 +2610,8 @@ void refreshNowPlayingUi(NowPlayingUi *ui) {
     if (full) {
       bool canTurnOn = off && v.valid && npHasKey(npSettings.volume, NPK_POWER_ON);
       npSetHidden(ui->volKeys, off);
-      npSetHidden(ui->volPowerBtn, !canTurnOn || !ui->hasMedia);
+      // When the audio is the player on screen, its own Turn on is enough.
+      npSetHidden(ui->volPowerBtn, !canTurnOn || !ui->hasMedia || npAudioIsShownSource());
       if (ui->muteLabel) setWidgetLabelText(ui->muteLabel, muted ? LV_SYMBOL_VOLUME_MAX : LV_SYMBOL_MUTE);
 
       if (ui->rxPanel) {
