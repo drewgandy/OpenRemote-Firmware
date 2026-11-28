@@ -385,6 +385,9 @@
 
 .activitiesButtonsGrid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
 .activityCard{padding:24px;min-height:560px}
+.activityOrder{display:flex;flex-direction:column;gap:4px;margin-left:auto}
+.activityMoveBtn{min-width:36px;padding:2px 8px;line-height:1.2}
+.activityMoveBtn:disabled{opacity:.35;cursor:default}
 .libraryCardHead{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:18px}
 .libraryCardHead h2{font-size:26px;margin:4px 0 8px;letter-spacing:-.025em}
 .libraryCardHead p{margin:0;color:var(--muted);line-height:1.45}
@@ -3357,6 +3360,10 @@
 .widgetBackgroundChoice{width:min(250px,48%)}
 
 /* Now Playing settings */
+.npSetupBar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.npSetupBar label{flex:1 1 200px}
+.npHalfHead{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.npAddSource{justify-self:start}
 .npHalf{border:1px solid var(--line);border-radius:16px;padding:14px;margin:4px 0 14px;display:grid;gap:12px}
 .npHalf h3{margin:0;font-size:15px}
 .npHalfSource{font-size:13px;color:var(--muted);line-height:1.4}
@@ -6173,13 +6180,25 @@
           <div>
             <div class="sectionTitle">Widget</div>
             <h2>Now Playing</h2>
-            <p>What is playing and how loud. Pick one of your devices for the artwork, title and progress (an Apple TV, a Roku) and one for volume, input and sound mode (an AV receiver, a TV on ARC) &mdash; either can be left empty. Status comes from the device's own connection: Home Assistant shows everything, Homebridge power, input and volume, MQTT whatever its topics carry, a Chromecast what the dock reports, and an IR device only what the remote remembers. Keys go to the same device's commands unless you choose otherwise. Tap the widget for transport keys, volume keys and a Receiver panel with the input and sound-mode pickers. Needs remote firmware with Now Playing support.</p>
+            <p>What is playing and how loud. Make one named widget per setup (&ldquo;Deck TV&rdquo;, &ldquo;Deck Music&rdquo;) and place each on its activity page; editing it changes every page it sits on. Pick one or more devices for the artwork, title and progress &mdash; with several, the widget shows whichever is playing &mdash; and one for audio: volume, input and sound mode (an AV receiver, a TV on ARC). Either half can be left empty. Status comes from the device's own connection: Home Assistant shows everything, Homebridge power, input and volume, MQTT whatever its topics carry, a Chromecast what the dock reports, and an IR device only what the remote remembers. Keys go to the same device's commands unless you choose otherwise. Tap the widget for transport keys, volume keys and a Receiver panel with the input and sound-mode pickers. Needs remote firmware with Now Playing support.</p>
             <div class="widgetUsage" id="widgetUsageNowPlaying">Not on any page yet</div>
           </div>
         </summary>
         <div class="widgetCardBody">
-          <div class="npHalf" id="widgetNowPlayingMediaHalf" data-np-half="media"></div>
-          <div class="npHalf" id="widgetNowPlayingVolumeHalf" data-np-half="volume"></div>
+          <div class="npSetupBar">
+            <label><span class="fieldLabel">Named widget</span><select class="textInput" id="widgetNowPlayingSetup"></select></label>
+            <button type="button" class="deviceSmallBtn" id="widgetNowPlayingNew">New</button>
+            <button type="button" class="deviceSmallBtn danger" id="widgetNowPlayingDelete">Delete</button>
+          </div>
+          <label><span class="fieldLabel">Name</span><input class="textInput" id="widgetNowPlayingName" maxlength="30" placeholder="Deck TV"></label>
+          <div id="widgetNowPlayingEditor">
+            <div id="widgetNowPlayingMediaList"></div>
+            <div class="npHalf" id="widgetNowPlayingVolumeHalf" data-np-half="volume"></div>
+          </div>
+          <div class="settingRow">
+            <div><div class="settingName">Hide audio label</div><div class="settingHint">The audio section shows only the level and its keys, plus &ldquo;Muted&rdquo; &mdash; for when the audio device is the same box as the player under another name (the Onkyo's Chromecast and receiver entries). When it is the very same entry the name and input are left out anyway.</div></div>
+            <label class="switch"><input type="checkbox" id="widgetNowPlayingHideLabel"><span></span></label>
+          </div>
           <div class="settingRow">
             <div><div class="settingName">Allow input change</div><div class="settingHint">Turn this off to show the current input without letting anyone change it.</div></div>
             <label class="switch"><input type="checkbox" id="widgetNowPlayingAllowInput" checked><span></span></label>
@@ -6613,8 +6632,8 @@
       media:{background:"theme",source:"auto",deviceId:"",castName:"",viaDock:true,autoExpand:true,artwork:true},
       power:{background:"theme",range:"60m",colours:defaultPowerColours()},
       /* Must match npSettings in the remote's now_playing_widget.h. */
-      nowPlaying:{background:"theme",media:defaultNowPlayingHalf(),volume:defaultNowPlayingHalf(),
-                  allowInput:true,allowSoundMode:true,volumeUnit:"db",dbOffset:-80,volumePopup:true,artwork:true}
+      /* Named widgets; each must match npDefaultSetup() in now_playing_widget.h. */
+      nowPlaying:{background:"theme",setups:[defaultNowPlayingSetup("np1","Now Playing")]}
     };
   }
 
@@ -6722,15 +6741,15 @@
     out.media.autoExpand=media.autoExpand!==false;
     out.media.artwork=media.artwork!==false;
     var np=raw.nowPlaying && typeof raw.nowPlaying==="object" ? raw.nowPlaying : {};
-    out.nowPlaying.media=normaliseNowPlayingHalf(np.media,np.mediaEntity);
-    out.nowPlaying.volume=normaliseNowPlayingHalf(np.volume,np.volumeEntity);
-    out.nowPlaying.allowInput=np.allowInput!==false;
-    out.nowPlaying.allowSoundMode=np.allowSoundMode!==false;
-    out.nowPlaying.volumeUnit=np.volumeUnit==="percent" ? "percent" : "db";
-    var offset=Number(np.dbOffset);
-    out.nowPlaying.dbOffset=isFinite(offset) && np.dbOffset!==null && np.dbOffset!=="" ? Math.max(-120,Math.min(20,offset)) : -80;
-    out.nowPlaying.volumePopup=np.volumePopup!==false;
-    out.nowPlaying.artwork=np.artwork!==false;
+    // Before named widgets there was one set of sources; it becomes the first.
+    var rawSetups=Array.isArray(np.setups) && np.setups.length ? np.setups : [np];
+    var seenIds={};
+    out.nowPlaying.setups=rawSetups.slice(0,8).map(function(raw,index){
+      var setup=normaliseNowPlayingSetup(raw,index);
+      while(seenIds[setup.id]) setup.id=setup.id+"x";
+      seenIds[setup.id]=true;
+      return setup;
+    });
     return out;
   }
 
@@ -7079,6 +7098,67 @@
             source:"none",entity:"",accessory:"",keys:{device:"",inputs:[]}};
   }
 
+  function defaultNowPlayingSetup(id,name){
+    return {id:id,name:name,media:[defaultNowPlayingHalf()],volume:defaultNowPlayingHalf(),hideAudioLabel:false,
+            allowInput:true,allowSoundMode:true,volumeUnit:"db",dbOffset:-80,volumePopup:true,artwork:true};
+  }
+
+  function normaliseNowPlayingSetup(raw,index){
+    raw=raw && typeof raw==="object" ? raw : {};
+    var id=typeof raw.id==="string" && /^[A-Za-z0-9_-]{1,23}$/.test(raw.id) ? raw.id : "np"+(index+1);
+    var setup=defaultNowPlayingSetup(id,typeof raw.name==="string" && raw.name.trim() ? raw.name.trim().slice(0,30) : (index ? "Now Playing "+(index+1) : "Now Playing"));
+    var media=Array.isArray(raw.media) ? raw.media : [raw.media];
+    setup.media=media.slice(0,3).map(function(half,i){
+      return normaliseNowPlayingHalf(half,i===0 && !Array.isArray(raw.media) ? raw.mediaEntity : undefined);
+    });
+    if(!setup.media.length) setup.media=[defaultNowPlayingHalf()];
+    setup.volume=normaliseNowPlayingHalf(raw.volume,raw.volumeEntity);
+    setup.hideAudioLabel=raw.hideAudioLabel===true;
+    setup.allowInput=raw.allowInput!==false;
+    setup.allowSoundMode=raw.allowSoundMode!==false;
+    setup.volumeUnit=raw.volumeUnit==="percent" ? "percent" : "db";
+    var offset=Number(raw.dbOffset);
+    setup.dbOffset=isFinite(offset) && raw.dbOffset!==null && raw.dbOffset!=="" && raw.dbOffset!==undefined ? Math.max(-120,Math.min(20,offset)) : -80;
+    setup.volumePopup=raw.volumePopup!==false;
+    setup.artwork=raw.artwork!==false;
+    return setup;
+  }
+
+  /* The named widget being edited in the library card. */
+  var npSelectedSetupId="";
+  function nowPlayingSetups(){
+    var np=widgetSettings && widgetSettings.nowPlaying;
+    if(!np) return [];
+    if(!Array.isArray(np.setups) || !np.setups.length) np.setups=[defaultNowPlayingSetup("np1","Now Playing")];
+    return np.setups;
+  }
+  function nowPlayingSetupById(id){
+    var setups=nowPlayingSetups();
+    return setups.find(function(setup){return setup.id===id;}) || setups[0];
+  }
+  function currentNowPlayingSetup(){
+    var setup=nowPlayingSetupById(npSelectedSetupId);
+    npSelectedSetupId=setup ? setup.id : "";
+    return setup;
+  }
+  function newNowPlayingSetupId(){
+    var used={};
+    nowPlayingSetups().forEach(function(setup){used[setup.id]=true;});
+    for(var n=1;n<99;n++) if(!used["np"+n]) return "np"+n;
+    return "np"+Date.now().toString(36).slice(-6);
+  }
+  /* Pages a named widget sits on. */
+  function nowPlayingSetupUsage(id){
+    var first=nowPlayingSetups()[0];
+    var count=0;
+    everyItemCollection().forEach(function(items){
+      items.forEach(function(item){
+        if(isWidgetItem(item) && item.widget==="nowPlaying" && ((item.nowPlaying||first.id)===id)) count++;
+      });
+    });
+    return count;
+  }
+
   function normaliseNowPlayingHalf(raw,legacyEntity){
     var half=defaultNowPlayingHalf();
     if(!raw || typeof raw!=="object"){
@@ -7199,18 +7279,19 @@
 
   function resolveNowPlayingSettings(){
     if(!widgetSettings || !widgetSettings.nowPlaying) return;
-    resolveNowPlayingHalf(widgetSettings.nowPlaying.media,"media");
-    resolveNowPlayingHalf(widgetSettings.nowPlaying.volume,"volume");
+    nowPlayingSetups().forEach(function(setup){
+      setup.media.forEach(function(half){ resolveNowPlayingHalf(half,"media"); });
+      resolveNowPlayingHalf(setup.volume,"volume");
+    });
   }
 
   function nowPlayingHalfActive(half){
     return !!(half && (half.device || half.entity || half.accessory || half.source==="mqtt"));
   }
 
-  function renderNowPlayingHalf(which){
-    var box=document.getElementById(which==="media" ? "widgetNowPlayingMediaHalf" : "widgetNowPlayingVolumeHalf");
-    if(!box || box.contains(document.activeElement)) return;
-    var half=widgetSettings.nowPlaying[which];
+  /* Draws one half's controls into box. which: "media" or "volume". */
+  function renderNowPlayingHalfBox(box,half,which,heading,removable){
+    if(!box) return;
     resolveNowPlayingHalf(half,which);
     var devices=(Array.isArray(addedDevices)?addedDevices:[]);
     var dev=nowPlayingDevice(half.device);
@@ -7225,7 +7306,8 @@
         return '<option value="'+esc(d.id)+'"'+(d.id===selected?' selected':'')+'>'+esc(d.name)+' \u2014 '+esc(transportName(d))+'</option>';
       }).join("");
     };
-    var html='<h3>'+(which==="media" ? "Now playing from" : "Volume from")+'</h3>'+
+    var html='<div class="npHalfHead"><h3>'+esc(heading)+'</h3>'+
+      (removable ? '<button type="button" class="deviceSmallBtn" data-np="remove">Remove</button>' : '')+'</div>'+
       '<select class="textInput" data-np="device">'+deviceOptions(half.device,"Nothing")+'</select>';
     if(!dev && half.entity) html+='<div class="npHalfSource">Home Assistant entity '+esc(half.entity)+' (from an earlier setup). Pick its device to manage keys here.</div>';
     if(dev) html+='<div class="npHalfSource">'+esc(nowPlayingSourceText(half.source))+'</div>';
@@ -7273,13 +7355,54 @@
     box.innerHTML=html;
   }
 
-  function bindNowPlayingHalf(which){
-    var box=document.getElementById(which==="media" ? "widgetNowPlayingMediaHalf" : "widgetNowPlayingVolumeHalf");
-    if(!box) return;
-    var changed=function(){ resolveNowPlayingHalf(widgetSettings.nowPlaying[which],which); widgetSettingsChanged(); };
-    box.addEventListener("change",function(e){
-      var half=widgetSettings.nowPlaying[which];
+  /* The selected named widget's sources: one or more "Now playing from"
+     halves, then "Audio from". Left alone while the user is typing in it. */
+  function renderNowPlayingEditor(){
+    var editor=document.getElementById("widgetNowPlayingEditor");
+    if(!editor || editor.contains(document.activeElement)) return;
+    var setup=currentNowPlayingSetup();
+    var list=document.getElementById("widgetNowPlayingMediaList");
+    if(list){
+      list.innerHTML="";
+      setup.media.forEach(function(half,index){
+        var box=document.createElement("div");
+        box.className="npHalf";
+        box.setAttribute("data-np-half","media:"+index);
+        list.appendChild(box);
+        renderNowPlayingHalfBox(box,half,"media",index ? "Or from" : "Now playing from",setup.media.length>1);
+      });
+      var last=setup.media[setup.media.length-1];
+      if(setup.media.length<3 && nowPlayingHalfActive(last)){
+        var add=document.createElement("button");
+        add.type="button";
+        add.className="deviceSmallBtn npAddSource";
+        add.setAttribute("data-np","addMedia");
+        add.textContent="+ Another source (shows whichever is playing)";
+        list.appendChild(add);
+      }
+    }
+    renderNowPlayingHalfBox(document.getElementById("widgetNowPlayingVolumeHalf"),setup.volume,"volume","Audio from",false);
+  }
+
+  /* One listener for every half in the editor; data-np-half says which. */
+  function bindNowPlayingEditor(){
+    var editor=document.getElementById("widgetNowPlayingEditor");
+    if(!editor) return;
+    var halfFor=function(el){
+      var box=el.closest("[data-np-half]");
+      if(!box) return null;
+      var key=box.getAttribute("data-np-half");
+      var setup=currentNowPlayingSetup();
+      if(key==="volume") return {half:setup.volume,which:"volume",box:box,setup:setup};
+      var index=Number(key.split(":")[1]) || 0;
+      return setup.media[index] ? {half:setup.media[index],which:"media",index:index,box:box,setup:setup} : null;
+    };
+    var changed=function(){ resolveNowPlayingSettings(); widgetSettingsChanged(); };
+    editor.addEventListener("change",function(e){
       var el=e.target;
+      var at=halfFor(el);
+      if(!at) return;
+      var half=at.half;
       var role=el.getAttribute("data-np");
       if(role==="device"){ half.device=el.value; half.keyChoice={}; half.inputChoice="auto"; half.keysDevice=""; half.entity=""; half.accessory=""; }
       else if(role==="keysDevice"){ half.keysDevice=el.value; half.keyChoice={}; half.inputChoice="auto"; }
@@ -7294,26 +7417,86 @@
         if(el.value==="auto") delete half.keyChoice[k]; else half.keyChoice[k]=el.value;
       }else if(el.hasAttribute("data-np-input")){
         var ids=[];
-        box.querySelectorAll("[data-np-input]").forEach(function(input){ if(input.checked) ids.push(input.getAttribute("data-np-input")); });
+        at.box.querySelectorAll("[data-np-input]").forEach(function(input){ if(input.checked) ids.push(input.getAttribute("data-np-input")); });
         half.inputChoice=ids;
       }else return;
-      // Let the half redraw once focus leaves it.
+      // Let the editor redraw once focus leaves it.
       if(el.tagName==="SELECT" || el.type==="checkbox") el.blur();
       changed();
     },false);
-    box.addEventListener("click",function(e){
-      if(e.target && e.target.getAttribute("data-np")==="inputsAuto"){
-        e.preventDefault();
-        widgetSettings.nowPlaying[which].inputChoice="auto";
+    editor.addEventListener("click",function(e){
+      var el=e.target;
+      if(!el || !el.getAttribute) return;
+      var role=el.getAttribute("data-np");
+      var setup=currentNowPlayingSetup();
+      if(role==="addMedia"){
+        if(setup.media.length<3) setup.media.push(defaultNowPlayingHalf());
+        el.blur();
         changed();
+      }else if(role==="remove"){
+        var at=halfFor(el);
+        if(at && at.which==="media" && setup.media.length>1){
+          setup.media.splice(at.index,1);
+          el.blur();
+          changed();
+        }
+      }else if(role==="inputsAuto"){
+        e.preventDefault();
+        var where=halfFor(el);
+        if(where){ where.half.inputChoice="auto"; changed(); }
       }
     },false);
   }
 
+  function bindNowPlayingSetupBar(){
+    var select=document.getElementById("widgetNowPlayingSetup");
+    if(select) select.addEventListener("change",function(){
+      npSelectedSetupId=select.value;
+      select.blur();
+      renderWidgetLibrary();
+    },false);
+    var name=document.getElementById("widgetNowPlayingName");
+    if(name) name.addEventListener("change",function(){
+      var setup=currentNowPlayingSetup();
+      setup.name=name.value.trim().slice(0,30) || setup.name;
+      name.value=setup.name;
+      widgetSettingsChanged();
+    },false);
+    var create=document.getElementById("widgetNowPlayingNew");
+    if(create) create.addEventListener("click",function(){
+      var setups=nowPlayingSetups();
+      if(setups.length>=8){ window.alert("Eight named Now Playing widgets is the most the remote keeps."); return; }
+      var setup=defaultNowPlayingSetup(newNowPlayingSetupId(),"Now Playing "+(setups.length+1));
+      setups.push(setup);
+      npSelectedSetupId=setup.id;
+      widgetSettingsChanged();
+      var input=document.getElementById("widgetNowPlayingName");
+      if(input){ input.focus(); input.select(); }
+    },false);
+    var remove=document.getElementById("widgetNowPlayingDelete");
+    if(remove) remove.addEventListener("click",function(){
+      var setups=nowPlayingSetups();
+      var setup=currentNowPlayingSetup();
+      if(setups.length<=1){ window.alert("Keep at least one Now Playing widget. Clear its sources instead."); return; }
+      var used=nowPlayingSetupUsage(setup.id);
+      var fallback=setups.find(function(other){return other.id!==setup.id;});
+      if(!window.confirm("Delete “"+setup.name+"”?"+(used ? " It is on "+used+" page"+(used===1?"":"s")+", which will show “"+fallback.name+"” instead." : ""))) return;
+      everyItemCollection().forEach(function(items){
+        items.forEach(function(item){
+          if(isWidgetItem(item) && item.widget==="nowPlaying" && (item.nowPlaying||setups[0].id)===setup.id) item.nowPlaying=fallback.id;
+        });
+      });
+      widgetSettings.nowPlaying.setups=setups.filter(function(other){return other.id!==setup.id;});
+      npSelectedSetupId=fallback.id;
+      widgetSettingsChanged();
+      if(typeof renderCurrentPage==="function") renderCurrentPage();
+    },false);
+  }
+
   /* A sample face: the remote fills in the real player's names and values. */
-  function nowPlayingVolumeSample(){
-    var np=widgetSettings.nowPlaying;
-    return np.volumeUnit==="percent" ? "48%" : Math.round(0.48*100+Number(np.dbOffset))+" dB";
+  function nowPlayingVolumeSample(setup){
+    setup=setup || currentNowPlayingSetup();
+    return setup.volumeUnit==="percent" ? "48%" : Math.round(0.48*100+Number(setup.dbOffset))+" dB";
   }
   function nowPlayingShortName(half,fallback){
     if(!half) return fallback;
@@ -7324,11 +7507,16 @@
     return fallback;
   }
   function nowPlayingTileMarkup(tileClass,style,data){
-    var np=widgetSettings.nowPlaying;
-    var hasMedia=nowPlayingHalfActive(np.media), hasVolume=nowPlayingHalfActive(np.volume);
-    var mediaName=escapeWidgetText(nowPlayingShortName(np.media,"Media player"));
-    var volumeName=escapeWidgetText(nowPlayingShortName(np.volume,"Receiver"));
-    var level=escapeWidgetText(nowPlayingVolumeSample());
+    var setup=data && data.setupId ? nowPlayingSetupById(data.setupId) : currentNowPlayingSetup();
+    var media=setup.media.find(nowPlayingHalfActive) || setup.media[0];
+    var hasMedia=nowPlayingHalfActive(media), hasVolume=nowPlayingHalfActive(setup.volume);
+    var mediaName=escapeWidgetText(nowPlayingShortName(media,"Media player"));
+    // The audio section's label follows the same rules as on the remote.
+    var sameEntry=hasMedia && hasVolume && ((media.device && media.device===setup.volume.device) ||
+      (media.entity && media.entity===setup.volume.entity));
+    var volumeName=setup.hideAudioLabel || sameEntry ? "" : escapeWidgetText(nowPlayingShortName(setup.volume,"Receiver"));
+    var volumeDetail=setup.hideAudioLabel ? "" : sameEntry ? "Sound mode" : "Input &middot; Sound mode";
+    var level=escapeWidgetText(nowPlayingVolumeSample(setup));
     var rows=data && data.rows ? data.rows : (data && data.slim ? 1 : 2);
     var cls='wgTile wgNowPlaying wgNpRows'+rows+tileClass;
     if(!hasMedia && !hasVolume){
@@ -7336,7 +7524,7 @@
         '<div class="wgSource">Choose the players below</div></div>';
     }
     var volumeBlock='<div class="wgNpVolume"><span class="wgNpIcon">&#128266;</span>'+
-      '<div class="wgNpVolText"><div class="wgNpVolName">'+volumeName+'</div><div class="wgSource">Input &middot; Sound mode</div></div>'+
+      '<div class="wgNpVolText"><div class="wgNpVolName">'+volumeName+'</div><div class="wgSource">'+volumeDetail+'</div></div>'+
       '<b class="wgNpLevel">'+level+'</b></div>';
     if(rows===1){
       return '<div class="'+cls+' wgNpSlim"'+style+'>'+
@@ -7354,7 +7542,7 @@
         '<div class="wgNpArt wgNpArtBig"></div>'+
         '<div class="wgNpTitle wgNpCenter">Title</div><div class="wgSource wgNpCenter">App &middot; S1 E1</div>'+progress+
         '<div class="wgNpKeys wgNpTransport"><i>&#9664;&#9664;</i><i class="wgNpPlay">&#9654;</i><i>&#9654;&#9654;</i></div>'+
-        (hasVolume ? '<div class="wgNpVolRow"><span class="wgNpIcon">&#128266;</span><span class="wgNpVolText">'+volumeName+' &middot; Input</span><b>'+level+'</b></div>'+
+        (hasVolume ? '<div class="wgNpVolRow"><span class="wgNpIcon">&#128266;</span><span class="wgNpVolText">'+[volumeName,volumeDetail].filter(Boolean).join(" &middot; ")+'</span><b>'+level+'</b></div>'+
           '<div class="wgNpKeys"><i>&minus;</i><i>Mute</i><i>+</i><i>Receiver</i></div>' : '')+
       '</div>';
     }
@@ -7488,7 +7676,7 @@
     var slim=!!(item && item.size==="slim");
     if(item && item.widget==="custom") return customWidgetTileMarkup(customWidgetById(item.customId),scale,slim);
     var kind=widgetKindOf(item);
-    if(kind==="nowPlaying") return widgetTileMarkup(kind,scale,{slim:slim,rows:widgetItemRows(item)});
+    if(kind==="nowPlaying") return widgetTileMarkup(kind,scale,{slim:slim,rows:widgetItemRows(item),setupId:item.nowPlaying});
     if(!slim) return widgetTileMarkup(kind,scale,{});
     return customWidgetTileMarkup({elements:[kind],background:widgetSettings[kind] ? widgetSettings[kind].background : "theme"},scale,true);
   }
@@ -7639,9 +7827,20 @@
     var mediaBackground=document.getElementById("widgetMediaBackground");
     if(mediaBackground) mediaBackground.value=widgetSettings.media.background;
 
-    var np=widgetSettings.nowPlaying;
-    renderNowPlayingHalf("media");
-    renderNowPlayingHalf("volume");
+    var np=currentNowPlayingSetup();
+    var npSetupSelect=document.getElementById("widgetNowPlayingSetup");
+    if(npSetupSelect && document.activeElement!==npSetupSelect){
+      npSetupSelect.innerHTML=nowPlayingSetups().map(function(setup){
+        var used=nowPlayingSetupUsage(setup.id);
+        return '<option value="'+escapeWidgetText(setup.id)+'"'+(setup.id===np.id?' selected':'')+'>'+
+          escapeWidgetText(setup.name)+(used ? " ("+used+" page"+(used===1?"":"s")+")" : "")+'</option>';
+      }).join("");
+    }
+    var npName=document.getElementById("widgetNowPlayingName");
+    if(npName && document.activeElement!==npName) npName.value=np.name;
+    renderNowPlayingEditor();
+    var npHide=document.getElementById("widgetNowPlayingHideLabel");
+    if(npHide) npHide.checked=np.hideAudioLabel;
     var npInput=document.getElementById("widgetNowPlayingAllowInput");
     if(npInput) npInput.checked=np.allowInput;
     var npSound=document.getElementById("widgetNowPlayingAllowSoundMode");
@@ -7880,17 +8079,18 @@
     },false);
     bindSwitch("widgetMediaAutoExpand",function(v){ widgetSettings.media.autoExpand=v; });
     bindSwitch("widgetMediaArtwork",function(v){ widgetSettings.media.artwork=v; });
-    bindNowPlayingHalf("media");
-    bindNowPlayingHalf("volume");
-    bindSwitch("widgetNowPlayingAllowInput",function(v){ widgetSettings.nowPlaying.allowInput=v; });
-    bindSwitch("widgetNowPlayingAllowSoundMode",function(v){ widgetSettings.nowPlaying.allowSoundMode=v; });
-    bindSelect("widgetNowPlayingUnit",function(v){ widgetSettings.nowPlaying.volumeUnit=v==="percent" ? "percent" : "db"; });
+    bindNowPlayingEditor();
+    bindNowPlayingSetupBar();
+    bindSwitch("widgetNowPlayingHideLabel",function(v){ currentNowPlayingSetup().hideAudioLabel=v; });
+    bindSwitch("widgetNowPlayingAllowInput",function(v){ currentNowPlayingSetup().allowInput=v; });
+    bindSwitch("widgetNowPlayingAllowSoundMode",function(v){ currentNowPlayingSetup().allowSoundMode=v; });
+    bindSelect("widgetNowPlayingUnit",function(v){ currentNowPlayingSetup().volumeUnit=v==="percent" ? "percent" : "db"; });
     bindSelect("widgetNowPlayingOffset",function(v){
       var offset=Number(v);
-      widgetSettings.nowPlaying.dbOffset=isFinite(offset) && v!=="" ? Math.max(-120,Math.min(20,offset)) : -80;
+      currentNowPlayingSetup().dbOffset=isFinite(offset) && v!=="" ? Math.max(-120,Math.min(20,offset)) : -80;
     });
-    bindSwitch("widgetNowPlayingPopup",function(v){ widgetSettings.nowPlaying.volumePopup=v; });
-    bindSwitch("widgetNowPlayingArtwork",function(v){ widgetSettings.nowPlaying.artwork=v; });
+    bindSwitch("widgetNowPlayingPopup",function(v){ currentNowPlayingSetup().volumePopup=v; });
+    bindSwitch("widgetNowPlayingArtwork",function(v){ currentNowPlayingSetup().artwork=v; });
 
     var widgetsTab=document.getElementById("tab-widgets");
     if(widgetsTab) widgetsTab.addEventListener("change",function(){
@@ -15046,7 +15246,19 @@
       panel.innerHTML='<div class="emptyDeviceHint">No activities yet. Press + Activity to build one.</div>';
       return;
     }
-    activities.forEach(function(act){
+    /* Order matters: it is the remote's activity order, and when more than one
+       activity could open on its own the higher one wins. */
+    var moveActivity=function(index,delta){
+      var target=index+delta;
+      if(target<0 || target>=activities.length) return;
+      var moved=activities.splice(index,1)[0];
+      activities.splice(target,0,moved);
+      renderActivities();
+      if(typeof renderCurrentPage==="function") renderCurrentPage();
+      var again=document.querySelector('#activityListPanel [data-activity-move="'+(delta<0?"up":"down")+'"][data-activity-index="'+target+'"]');
+      if(again && !again.disabled) again.focus();
+    };
+    activities.forEach(function(act,actIndex){
       var item=document.createElement("div");
       item.className="activityLibraryItem";
       var top=document.createElement("div");
@@ -15102,6 +15314,22 @@
       actions.appendChild(edit);
       actions.appendChild(duplicate);
       actions.appendChild(del);
+      var order=document.createElement("div");
+      order.className="activityOrder";
+      [["up","\u2191","Move up"],["down","\u2193","Move down"]].forEach(function(spec){
+        var btn=document.createElement("button");
+        btn.className="deviceSmallBtn activityMoveBtn";
+        btn.type="button";
+        btn.textContent=spec[1];
+        btn.title=spec[2];
+        btn.setAttribute("aria-label",spec[2]+" — "+act.name);
+        btn.setAttribute("data-activity-move",spec[0]);
+        btn.setAttribute("data-activity-index",String(actIndex));
+        btn.disabled=spec[0]==="up" ? actIndex===0 : actIndex===activities.length-1;
+        btn.addEventListener("click",function(){ moveActivity(actIndex,spec[0]==="up" ? -1 : 1); },false);
+        order.appendChild(btn);
+      });
+      title.appendChild(order);
       top.appendChild(title);
       top.appendChild(actions);
       item.appendChild(top);
@@ -15889,7 +16117,9 @@
       renderCanvasWidgetOptions(widgetSel);
       if(item && isWidgetItem(item)){
         widgetSel.value=item.widget==="custom" && customWidgetById(item.customId)
-          ? "custom:"+item.customId : widgetKindOf(item);
+          ? "custom:"+item.customId
+          : item.widget==="nowPlaying" ? "nowPlaying:"+nowPlayingSetupById(item.nowPlaying).id
+          : widgetKindOf(item);
       }
       var widgetSizeSel=document.getElementById("canvasWidgetSize");
       if(widgetSizeSel){
@@ -15911,8 +16141,17 @@
       '<option value="weather">Weather &mdash; current conditions</option>'+
       '<option value="battery">Battery &mdash; the remote\'s charge</option>'+
       '<option value="power">Power &mdash; estimated power use over time</option>'+
-      '<option value="nowPlaying">Now Playing &mdash; media and volume from Home Assistant</option>'+
     '</optgroup>';
+    // Each named Now Playing widget is its own entry.
+    var npGroup=document.createElement("optgroup");
+    npGroup.label="Now Playing";
+    nowPlayingSetups().forEach(function(setup){
+      var option=document.createElement("option");
+      option.value="nowPlaying:"+setup.id;
+      option.textContent=setup.name+" — Now Playing";
+      npGroup.appendChild(option);
+    });
+    select.appendChild(npGroup);
     if(customWidgets.length){
       var group=document.createElement("optgroup");
       group.label="Your widgets";
@@ -15933,6 +16172,9 @@
     if(value.indexOf("custom:")===0 && customWidgetById(value.slice(7))){
       item.widget="custom";
       item.customId=value.slice(7);
+    }else if(value==="nowPlaying" || value.indexOf("nowPlaying:")===0){
+      item.widget="nowPlaying";
+      item.nowPlaying=nowPlayingSetupById(value.slice(11)).id;
     }else{
       item.widget=WIDGET_KINDS.indexOf(value)>=0 ? value : "media";
     }
@@ -15943,6 +16185,7 @@
 
   function canvasWidgetDefaultName(value){
     var custom=String(value || "").indexOf("custom:")===0 ? customWidgetById(String(value).slice(7)) : null;
+    if(String(value || "").indexOf("nowPlaying")===0) return nowPlayingSetupById(String(value).slice(11)).name;
     return custom ? custom.name : widgetKindLabel(value);
   }
 
@@ -15951,7 +16194,7 @@
     var select=document.getElementById("canvasWidgetSelect");
     var sizeSel=document.getElementById("canvasWidgetSize");
     if(!select || !sizeSel) return;
-    var tall=select.value==="nowPlaying";
+    var tall=String(select.value).indexOf("nowPlaying")===0;
     sizeSel.querySelectorAll("option[data-tall]").forEach(function(option){
       option.hidden=!tall;
       option.disabled=!tall;
@@ -16128,6 +16371,7 @@
       item.size=chosenWidget.size;
       if(chosenWidget.autoHide) item.autoHide=true; else delete item.autoHide;
       if(chosenWidget.customId) item.customId=chosenWidget.customId; else delete item.customId;
+      if(chosenWidget.nowPlaying) item.nowPlaying=chosenWidget.nowPlaying; else delete item.nowPlaying;
       /* A widget draws its own face, so none of the tile decoration applies. */
       delete item.iconSrc;
       delete item.iconName;

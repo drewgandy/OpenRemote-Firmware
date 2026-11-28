@@ -19951,6 +19951,9 @@ uint8_t findCustomWidgetIndex(const char *id) {
   deleted from WebConfig on another computer, say - comes back as
   WIDGET_NO_CUSTOM and is left off the page rather than drawn empty.
 */
+uint8_t npSetupIndexById(const char *id);
+void loadNowPlayingSettings(JsonObjectConst widgets);
+
 void parseWidgetItem(JsonObjectConst item, uint8_t &kind, uint8_t &custom, uint8_t &rows) {
   // "slim" and "large" from every build; "3" to "5" for Now Playing.
   const char *size = item["size"] | "large";
@@ -19966,6 +19969,8 @@ void parseWidgetItem(JsonObjectConst item, uint8_t &kind, uint8_t &custom, uint8
   }
   // Only Now Playing has faces taller than two rows so far.
   if (kind != WIDGET_NOWPLAYING && rows > 2) rows = 2;
+  // Which named Now Playing widget, carried in `custom` like a custom widget's index.
+  if (kind == WIDGET_NOWPLAYING) custom = npSetupIndexById(item["nowPlaying"] | "");
 }
 
 // Element numbers match the library kinds, so a library widget "shows" itself.
@@ -20048,10 +20053,8 @@ void applyCustomWidgetsJson(JsonArrayConst rows, JsonArrayConst wallpapers) {
   }
 }
 
-void loadNowPlayingSettings(JsonObjectConst widgets);
-
 void applyWidgetSettingsJson(JsonObjectConst widgets, JsonArrayConst wallpapers) {
-  loadNowPlayingSettings(widgets);
+  // (Now Playing's named widgets are read earlier, in loadRuntimeModel.)
   if (widgets.isNull()) return;
 
   JsonObjectConst weather = widgets["weather"].as<JsonObjectConst>();
@@ -20236,6 +20239,8 @@ void appendRuntimeSequenceStep(ActivityStep *steps, uint8_t &stepCount,
 }
 
 void loadRuntimeModel(JsonDocument &doc) {
+  // Named Now Playing widgets first: the pages below refer to them by id.
+  loadNowPlayingSettings(doc["widgets"].as<JsonObjectConst>());
   activitySequenceActive = false;
   activitySequenceMacro = -1;
   // Runtime indexes point into arrays that are about to be rebuilt. Returning
@@ -41769,7 +41774,8 @@ uint8_t buildWidgetContents(lv_obj_t *card, uint8_t kind, uint8_t custom, int wi
     if (!capacity) return 0;
     initWidgetInstance(instances[0], card, kind, width, height, expanded);
     instances[0].cell = slim && !expanded;
-    instances[0].nowPlayingUi = buildNowPlayingFace(card, width, height, expanded, slim);
+    // For Now Playing, `custom` carries which named widget this is.
+    instances[0].nowPlayingUi = buildNowPlayingFace(card, width, height, expanded, slim, custom);
     instances[0].tile = card;
     instances[0].ownerKind = kind;
     instances[0].custom = custom;
@@ -43205,10 +43211,10 @@ void serviceMediaTarget(uint32_t now) {
   // only one guaranteed to match what the Chromecast actually advertises.
   if (widgetSettings.mediaCastName[0]) {
     strlcpy(wanted, widgetSettings.mediaCastName, sizeof(wanted));
-  } else if (npSettings.media.type == NP_SRC_CAST && npSettings.media.keysDevice[0] &&
-             findRuntimeDevice(npSettings.media.keysDevice)) {
-    // The device a Now Playing widget is pinned to.
-    strlcpy(wanted, findRuntimeDevice(npSettings.media.keysDevice)->name, sizeof(wanted));
+  } else if (nowPlayingCastDevice() && nowPlayingCastDevice()[0] &&
+             findRuntimeDevice(nowPlayingCastDevice())) {
+    // The device a Now Playing widget on screen reads.
+    strlcpy(wanted, findRuntimeDevice(nowPlayingCastDevice())->name, sizeof(wanted));
   } else if (widgetSettings.mediaUseNamedDevice && widgetSettings.mediaDeviceId[0]) {
     Device *pinned = findRuntimeDevice(widgetSettings.mediaDeviceId);
     if (pinned) strlcpy(wanted, pinned->name, sizeof(wanted));

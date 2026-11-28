@@ -40,7 +40,7 @@
 #pragma once
 
 static const uint8_t NP_MAX_LIST = 24;
-static const uint8_t NP_LIST_TEXT = 32;
+static const uint8_t NP_LIST_TEXT = 40;   // "STEREO (Front 2 Speakers Only)" fits
 static const int16_t NP_ART_SIZE = 96;
 
 enum NpSourceType : uint8_t {
@@ -77,6 +77,7 @@ enum NpVolumeScale : uint8_t { NP_SCALE_UNIT = 0, NP_SCALE_PERCENT = 1, NP_SCALE
 
 struct NpSourceSettings {
   uint8_t type;                        // NpSourceType
+  char device[48];                     // the WebConfig device this half is, or empty
   char entity[64];                     // Home Assistant media_player
   char accessory[72];                  // Homebridge service uniqueId
   char mqttJsonTopic[96];              // empty: one topic per field
@@ -89,9 +90,22 @@ struct NpSourceSettings {
   uint8_t inputCount;
 };
 
-struct NowPlayingSettings {
-  NpSourceSettings media;
-  NpSourceSettings volume;
+/*
+  One named Now Playing widget ("Deck TV", "Deck Music"), created once in
+  WebConfig's widget library and placed on any number of pages. "Now playing
+  from" may list several sources - AirPlay through the receiver and a
+  Chromecast, say - and the widget shows whichever is playing.
+*/
+static const uint8_t NP_MAX_SETUPS = 8;
+static const uint8_t NP_MAX_MEDIA = 3;
+
+struct NpSetup {
+  char id[24];
+  char name[32];
+  NpSourceSettings media[NP_MAX_MEDIA];
+  uint8_t mediaCount;
+  NpSourceSettings volume;   // "Audio from"
+  bool hideAudioLabel;   // the audio section shows no name or input, just the level
   bool allowInput;       // the input grid is shown and usable
   bool allowSoundMode;   // the sound-mode grid is shown and usable
   bool volumeDb;         // dB rather than percent
@@ -100,19 +114,15 @@ struct NowPlayingSettings {
   bool artwork;          // download and show artwork
 };
 
-/* Defaults must match defaultWidgetSettings().nowPlaying in WebConfig. */
-NowPlayingSettings npSettings = {};
-
-static void npDefaultSettings(NowPlayingSettings &settings) {
-  memset(&settings, 0, sizeof(settings));
-  settings.media.type = NP_SRC_HA;
-  settings.volume.type = NP_SRC_HA;
-  settings.allowInput = true;
-  settings.allowSoundMode = true;
-  settings.volumeDb = true;
-  settings.dbOffset = -80.0f;
-  settings.volumePopup = true;
-  settings.artwork = true;
+/* Defaults must match defaultNowPlayingSetup() in WebConfig. */
+static void npDefaultSetup(NpSetup &setup) {
+  memset(&setup, 0, sizeof(setup));
+  setup.allowInput = true;
+  setup.allowSoundMode = true;
+  setup.volumeDb = true;
+  setup.dbOffset = -80.0f;
+  setup.volumePopup = true;
+  setup.artwork = true;
 }
 
 struct NpEntityState {
@@ -147,8 +157,92 @@ struct NpEntityState {
   uint32_t listHash;     // changes when either list changes
 };
 
-NpEntityState npMedia = {};
-NpEntityState npVolume = {};
+/* What one named widget knows right now: every source's state, which media
+   source it is showing, its read schedule and its artwork. */
+struct NpRuntime {
+  NpEntityState media[NP_MAX_MEDIA];
+  NpEntityState volume;
+  uint8_t shown;          // the media source on screen
+  uint8_t lastPlayed;     // the last one seen playing; 0xFF none yet
+  uint32_t pollNextMs;
+  uint8_t pollTurn;
+  uint8_t pollOther;      // round robin over the sources not on screen
+  uint32_t refreshMediaAtMs;
+  uint32_t refreshVolumeAtMs;
+  uint32_t refreshVolumeLateMs;
+  char guessedInput[2][NP_LIST_TEXT];          // IR: [0] media, [1] audio
+  char mqttSeen[NP_MAX_MEDIA + 1][NPF_COUNT][48];   // per-field values via the dock
+  uint8_t *artPixels;
+  lv_img_dsc_t artDescriptor;
+  char artKey[200];       // what artPixels shows
+  char artFailedKey[200]; // what last failed to download
+  uint8_t artFailures;
+  uint32_t artRetryAtMs;
+};
+
+/*
+  The named widgets and their state live in PSRAM: each setup carries up to
+  four sources' worth of settings and state, far too much for internal RAM.
+  Everything below works on one setup at a time - npUse() points npCur and
+  npRt at it - so the faces, keys and readers read as if there were only
+  one widget, which is what they were written for.
+*/
+NpSetup *npSetups = nullptr;
+NpRuntime *npRuntimes = nullptr;
+uint8_t npSetupCount = 0;
+NpSetup *npCur = nullptr;
+NpRuntime *npRt = nullptr;
+uint8_t npCurIndex = 0;
+int8_t npLastShownSetup = -1;   // the named widget most recently on screen
+
+static bool npStorageReady() {
+  if (npSetups && npRuntimes && npSetupCount) return true;
+  // Always at least one (blank) setup, so npCur is never null.
+  size_t setupBytes = sizeof(NpSetup), runtimeBytes = sizeof(NpRuntime);
+  npSetups = (NpSetup *)(psramFound() ? ps_calloc(1, setupBytes) : calloc(1, setupBytes));
+  npRuntimes = (NpRuntime *)(psramFound() ? ps_calloc(1, runtimeBytes) : calloc(1, runtimeBytes));
+  if (!npSetups || !npRuntimes) {
+    free(npSetups); free(npRuntimes);
+    npSetups = nullptr; npRuntimes = nullptr; npSetupCount = 0;
+    return false;
+  }
+  npDefaultSetup(npSetups[0]);
+  npRuntimes[0].lastPlayed = 0xFF;
+  npSetupCount = 1;
+  npCur = &npSetups[0];
+  npRt = &npRuntimes[0];
+  npCurIndex = 0;
+  return true;
+}
+
+/* Makes setup `index` the one everything below acts on. */
+static bool npUse(uint8_t index) {
+  if (!npStorageReady()) return false;
+  if (index >= npSetupCount) index = 0;
+  npCurIndex = index;
+  npCur = &npSetups[index];
+  npRt = &npRuntimes[index];
+  if (npRt->shown >= max((uint8_t)1, npCur->mediaCount)) npRt->shown = 0;
+  return true;
+}
+
+/* The current setup, its shown media source and their state. */
+#define npSettings (*npCur)
+#define npCurMedia (npCur->media[npRt->shown])
+#define npMedia (npRt->media[npRt->shown])
+#define npVolume (npRt->volume)
+#define npPollNextMs (npRt->pollNextMs)
+#define npPollTurn (npRt->pollTurn)
+#define npRefreshMediaAtMs (npRt->refreshMediaAtMs)
+#define npRefreshVolumeAtMs (npRt->refreshVolumeAtMs)
+#define npRefreshVolumeLateMs (npRt->refreshVolumeLateMs)
+#define npArtPixels (npRt->artPixels)
+#define npArtDescriptor (npRt->artDescriptor)
+#define npArtKey (npRt->artKey)
+#define npArtFailedKey (npRt->artFailedKey)
+#define npArtFailures (npRt->artFailures)
+#define npArtRetryAtMs (npRt->artRetryAtMs)
+
 /* One scratch copy for every reader - they all run on the loop, one at a
    time - kept static because two lists of names are too big for the loop
    task's stack, and shared because internal RAM is scarce. */
@@ -158,12 +252,6 @@ NpEntityState npScratch = {};
 static const uint32_t NP_FEATURE_SEEK = 2;
 static const uint32_t NP_FEATURE_TURN_ON = 128;
 
-/* Polling and refresh scheduling. */
-uint32_t npPollNextMs = 0;
-uint8_t npPollTurn = 0;
-uint32_t npRefreshMediaAtMs = 0;
-uint32_t npRefreshVolumeAtMs = 0;
-uint32_t npRefreshVolumeLateMs = 0;
 bool npDirty = false;
 
 /* The volume pop-up. */
@@ -172,15 +260,8 @@ lv_obj_t *npPopupName = nullptr;
 lv_obj_t *npPopupValue = nullptr;
 lv_obj_t *npPopupFill = nullptr;
 uint32_t npPopupUntilMs = 0;
+uint8_t npPopupSetupIndex = 0;   // whose audio the pop-up shows
 static const int NP_POPUP_TRACK = 176;
-
-/* Artwork, kept apart from the Chromecast Media widget's poster. */
-uint8_t *npArtPixels = nullptr;
-lv_img_dsc_t npArtDescriptor = {};
-char npArtKey[200] = "";          // what npArtPixels shows
-char npArtFailedKey[200] = "";    // what last failed to download
-uint8_t npArtFailures = 0;
-uint32_t npArtRetryAtMs = 0;
 
 /* A button press, run from the loop rather than inside the LVGL callback. */
 enum NpAction : uint8_t {
@@ -200,6 +281,7 @@ enum NpAction : uint8_t {
 };
 volatile uint8_t npPendingAction = NP_ACT_NONE;
 volatile uint8_t npPendingIndex = 0;
+volatile uint8_t npPendingSetup = 0;
 
 /* Which face a widget draws, chosen from its height. */
 enum NpLayout : uint8_t {
@@ -210,6 +292,7 @@ enum NpLayout : uint8_t {
 };
 
 struct NowPlayingUi {
+  uint8_t setup;         // which named widget this face draws
   uint8_t layout;        // NpLayout
   bool expanded;         // in the expanded overlay rather than on the page
   bool slim;
@@ -295,7 +378,7 @@ static bool npHalfActive(const NpSourceSettings &half) {
 }
 
 bool nowPlayingConfigured() {
-  return npHalfActive(npSettings.media) || npHalfActive(npSettings.volume);
+  return npHalfActive(npCurMedia) || npHalfActive(npSettings.volume);
 }
 
 static const char *npHalfName(const NpSourceSettings &half, const NpEntityState &s,
@@ -465,7 +548,10 @@ bool npReadHa(NpEntityState &s, const char *entityId) {
     }
   } else if (title[0]) {
     npCopyText(title, next.title, sizeof(next.title));
-    if (artist[0] && album[0]) snprintf(subtitle, sizeof(subtitle), "%s - %s", artist, album);
+    // Singles often carry the title as the album too; don't repeat it
+    // ("Moye - And the Band Played Satin Doll" under the same title).
+    bool albumRepeats = album[0] && strcasecmp(album, title) == 0;
+    if (artist[0] && album[0] && !albumRepeats) snprintf(subtitle, sizeof(subtitle), "%s - %s", artist, album);
     else if (artist[0]) strlcpy(subtitle, artist, sizeof(subtitle));
     else if (channel[0]) strlcpy(subtitle, channel, sizeof(subtitle));
   } else if (channel[0]) {
@@ -692,24 +778,50 @@ static void npApplyMqttMessage(NpEntityState &s, const NpSourceSettings &half,
   48-character copy - so a JSON state topic arrives whole. Called from
   mqttMessageArrived(), on the loop.
 */
+static void npPickShown();
+
 void nowPlayingMqttMessage(const char *topic, const uint8_t *payload, unsigned int length) {
-  npApplyMqttMessage(npMedia, npSettings.media, topic, (const char *)payload, length);
-  npApplyMqttMessage(npVolume, npSettings.volume, topic, (const char *)payload, length);
+  if (!npStorageReady()) return;
+  uint8_t keep = npCurIndex;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    npUse(i);
+    for (uint8_t m = 0; m < npCur->mediaCount; m++) {
+      npApplyMqttMessage(npRt->media[m], npCur->media[m], topic, (const char *)payload, length);
+    }
+    npApplyMqttMessage(npVolume, npSettings.volume, topic, (const char *)payload, length);
+    npPickShown();
+  }
+  npUse(keep);
 }
 
-/* Topics the MQTT subscriptions should include. */
+static bool npTopicListed(const char *topics[], uint8_t count, const char *topic) {
+  for (uint8_t i = 0; i < count; i++) if (strcmp(topics[i], topic) == 0) return true;
+  return false;
+}
+
+static void npAddTopics(const NpSourceSettings &half, const char *topics[], uint8_t &count,
+                        uint8_t maximum) {
+  if (half.type != NP_SRC_MQTT) return;
+  if (half.mqttJsonTopic[0]) {
+    if (count < maximum && !npTopicListed(topics, count, half.mqttJsonTopic)) {
+      topics[count++] = half.mqttJsonTopic;
+    }
+    return;
+  }
+  for (uint8_t f = 0; f < NPF_COUNT && count < maximum; f++) {
+    if (half.mqttFields[f][0] && !npTopicListed(topics, count, half.mqttFields[f])) {
+      topics[count++] = half.mqttFields[f];
+    }
+  }
+}
+
+/* Topics the MQTT subscriptions should include, for every named widget. */
 uint8_t nowPlayingMqttTopics(const char *topics[], uint8_t maximum) {
   uint8_t count = 0;
-  const NpSourceSettings *halves[2] = { &npSettings.media, &npSettings.volume };
-  for (const NpSourceSettings *half : halves) {
-    if (half->type != NP_SRC_MQTT) continue;
-    if (half->mqttJsonTopic[0]) {
-      if (count < maximum) topics[count++] = half->mqttJsonTopic;
-      continue;
-    }
-    for (uint8_t f = 0; f < NPF_COUNT && count < maximum; f++) {
-      if (half->mqttFields[f][0]) topics[count++] = half->mqttFields[f];
-    }
+  if (!npStorageReady()) return 0;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    for (uint8_t m = 0; m < npSetups[i].mediaCount; m++) npAddTopics(npSetups[i].media[m], topics, count, maximum);
+    npAddTopics(npSetups[i].volume, topics, count, maximum);
   }
   return count;
 }
@@ -718,15 +830,14 @@ uint8_t nowPlayingMqttTopics(const char *topics[], uint8_t maximum) {
   With a dock carrying MQTT, per-field values come back through the tiles'
   live-state table (up to 47 characters each). Picked up from there.
 */
-static void npMqttFromLiveStates(NpEntityState &s, const NpSourceSettings &half) {
+static void npMqttFromLiveStates(NpEntityState &s, const NpSourceSettings &half,
+                                 char seen[][48]) {
   if (half.type != NP_SRC_MQTT || half.mqttJsonTopic[0]) return;
-  static char seen[2][NPF_COUNT][48];
-  uint8_t slot = &half == &npSettings.media ? 0 : 1;
   for (uint8_t f = 0; f < NPF_COUNT; f++) {
     if (!half.mqttFields[f][0]) continue;
     const char *value = liveStateFor(half.mqttFields[f]);
-    if (!value || strcmp(value, seen[slot][f]) == 0) continue;
-    strlcpy(seen[slot][f], value, sizeof(seen[slot][f]));
+    if (!value || strcmp(value, seen[f]) == 0) continue;
+    strlcpy(seen[f], value, 48);
     npApplyMqttMessage(s, half, half.mqttFields[f], value, strlen(value));
   }
 }
@@ -859,7 +970,6 @@ static DeviceCommand *npFindCommand(Device *device, const char *id) {
 
 /* None: nothing reports back, so show only what the remote itself knows -
    the device's tracked power and the last input picked here. */
-char npGuessedInput[2][NP_LIST_TEXT] = {"", ""};
 
 static void npFromNothing(NpEntityState &s, const NpSourceSettings &half, uint8_t slot) {
   NpEntityState &next = npScratch;
@@ -872,7 +982,7 @@ static void npFromNothing(NpEntityState &s, const NpSourceSettings &half, uint8_
   bool on = true;
   if (device && device->powerTrackingEnabled) on = rememberedDeviceOn(*device);
   strlcpy(next.state, on ? "on" : "off", sizeof(next.state));
-  strlcpy(next.source, npGuessedInput[slot], sizeof(next.source));
+  strlcpy(next.source, npRt->guessedInput[slot ? 1 : 0], sizeof(next.source));
   if (memcmp(&s, &next, sizeof(next)) != 0) {
     s = next;
     npDirty = true;
@@ -1050,12 +1160,15 @@ bool nowPlayingOnScreen();
 /* The picture the media half shows: the Media widget's poster for a
    Chromecast, otherwise this widget's own. */
 const void *npMediaArtSource() {
-  if (npSettings.media.type == NP_SRC_CAST) return mediaArtSource();
+  if (npCurMedia.type == NP_SRC_CAST) return mediaArtSource();
   return npArtSource();
 }
 
-void serviceNowPlayingArtwork(uint32_t now) {
-  uint8_t type = npSettings.media.type;
+bool nowPlayingSetupOnScreen(uint8_t index);
+
+/* Artwork for the current setup's shown source. */
+static void npServiceArtworkFor(uint32_t now) {
+  uint8_t type = npCurMedia.type;
   if (!npSettings.artwork || (type != NP_SRC_HA && type != NP_SRC_MQTT)) {
     if (npArtPixels) npArtRelease();
     return;
@@ -1067,7 +1180,7 @@ void serviceNowPlayingArtwork(uint32_t now) {
     return;
   }
   if (strcmp(key, npArtKey) == 0) return;
-  if (displaySleeping || !nowPlayingOnScreen()) return;
+  if (displaySleeping || !nowPlayingSetupOnScreen(npCurIndex)) return;
 
   char path[64];
   mediaArtFileForUrl(key, path, sizeof(path));
@@ -1089,6 +1202,16 @@ void serviceNowPlayingArtwork(uint32_t now) {
   }
 }
 
+void serviceNowPlayingArtwork(uint32_t now) {
+  uint8_t keep = npCurIndex;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    npUse(i);
+    if (nowPlayingSetupOnScreen(i)) npServiceArtworkFor(now);
+    else if (!npSettings.artwork && npArtPixels) npArtRelease();
+  }
+  npUse(keep);
+}
+
 /* ------------------------------------------------------------- polling */
 
 bool nowPlayingPopupActive() {
@@ -1103,12 +1226,41 @@ static bool npPolled(const NpSourceSettings &half) {
   return false;
 }
 
+/* Two halves that are the same thing - the same device, entity or
+   accessory - so one read serves both, and the audio section need not name
+   it again. */
+static bool npSameEntry(const NpSourceSettings &a, const NpSourceSettings &b) {
+  if (a.device[0] && b.device[0]) return strcmp(a.device, b.device) == 0;
+  if (a.type != b.type) return false;
+  if (a.type == NP_SRC_HA) return a.entity[0] && strcmp(a.entity, b.entity) == 0;
+  if (a.type == NP_SRC_HOMEBRIDGE) return a.accessory[0] && strcmp(a.accessory, b.accessory) == 0;
+  return false;
+}
+
+bool nowPlayingSetupOnScreen(uint8_t index);
+
+/* Whether setup `index` needs its state kept fresh right now. */
+static bool npSetupWanted(uint8_t index) {
+  if (index >= npSetupCount || displaySleeping) return false;
+  const NpRuntime &rt = npRuntimes[index];
+  return nowPlayingSetupOnScreen(index) ||
+         (nowPlayingPopupActive() && npPopupSetupIndex == index) ||
+         rt.refreshMediaAtMs || rt.refreshVolumeAtMs || rt.refreshVolumeLateMs;
+}
+
+static bool npSetupPolled(uint8_t index) {
+  const NpSetup &setup = npSetups[index];
+  for (uint8_t m = 0; m < setup.mediaCount; m++) if (npPolled(setup.media[m])) return true;
+  return npPolled(setup.volume);
+}
+
 /* Whether anything on screen needs a fresh read over the network. */
 bool nowPlayingPollWanted() {
-  if (displaySleeping) return false;
-  if (!npPolled(npSettings.media) && !npPolled(npSettings.volume)) return false;
-  return nowPlayingOnScreen() || nowPlayingPopupActive() ||
-         npRefreshMediaAtMs || npRefreshVolumeAtMs || npRefreshVolumeLateMs;
+  if (displaySleeping || !npStorageReady()) return false;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    if (npSetupPolled(i) && npSetupWanted(i)) return true;
+  }
+  return false;
 }
 
 static bool npDue(uint32_t &at, uint32_t now) {
@@ -1123,54 +1275,138 @@ static bool npRead(NpEntityState &s, const NpSourceSettings &half) {
   return npReadHomebridge(s, half);
 }
 
-/* One read, if one is due. The caller has the station connected. */
-void pollNowPlaying(uint32_t now) {
-  const NpSourceSettings &media = npSettings.media;
-  const NpSourceSettings &volume = npSettings.volume;
-  bool pollMedia = npPolled(media), pollVolume = npPolled(volume);
-  bool same = pollMedia && pollVolume && media.type == volume.type &&
-              (media.type == NP_SRC_HA ? strcmp(media.entity, volume.entity) == 0
-                                       : strcmp(media.accessory, volume.accessory) == 0);
-  bool readMedia = false, readVolume = false;
-  if (pollVolume && (npDue(npRefreshVolumeAtMs, now) || npDue(npRefreshVolumeLateMs, now))) {
-    readVolume = true;
-  } else if (pollMedia && npDue(npRefreshMediaAtMs, now)) {
-    readMedia = true;
-  } else if (!npPollNextMs || (int32_t)(now - npPollNextMs) >= 0) {
-    // Turn about: the media player, then the receiver.
-    npPollTurn ^= 1;
-    if (npPollTurn && pollMedia) readMedia = true;
-    else if (pollVolume) readVolume = true;
-    else readMedia = pollMedia;
-    // Both every ~4 s; a single player every ~2.5 s.
-    npPollNextMs = now + ((pollMedia && pollVolume && !same) ? 2000UL : 2500UL);
+/*
+  Several "Now playing from" sources: show whichever is playing (the first in
+  the list if more than one is), else the last one seen playing, else the
+  first. Kept per setup.
+*/
+static void npPickShown() {
+  uint8_t count = max((uint8_t)1, npCur->mediaCount);
+  uint8_t shown = npRt->shown < count ? npRt->shown : 0;
+  int8_t playing = -1;
+  for (uint8_t m = 0; m < npCur->mediaCount; m++) {
+    if (npIsPlaying(npRt->media[m])) { playing = (int8_t)m; break; }
   }
-  if (same && (readMedia || readVolume)) {
-    if (npRead(npMedia, media)) npVolume = npMedia;
-    return;
+  if (playing >= 0) {
+    shown = (uint8_t)playing;
+    npRt->lastPlayed = shown;
+  } else if (npRt->lastPlayed < count) {
+    shown = npRt->lastPlayed;
   }
-  if (readMedia) npRead(npMedia, media);
-  if (readVolume) npRead(npVolume, volume);
+  if (shown != npRt->shown) {
+    npRt->shown = shown;
+    npDirty = true;
+  }
 }
 
-/* Sources that arrive rather than being fetched: refreshed from the loop. */
+/* Reads one media source, and the audio half too if it is the same entry. */
+static void npReadMedia(uint8_t m) {
+  if (m >= npCur->mediaCount) return;
+  if (!npRead(npRt->media[m], npCur->media[m])) return;
+  if (npSameEntry(npCur->media[m], npCur->volume)) npRt->volume = npRt->media[m];
+}
+
+/* Reads the audio half, and any media source that is the same entry. */
+static void npReadVolume() {
+  if (!npRead(npRt->volume, npCur->volume)) return;
+  for (uint8_t m = 0; m < npCur->mediaCount; m++) {
+    if (npSameEntry(npCur->media[m], npCur->volume)) npRt->media[m] = npRt->volume;
+  }
+}
+
+/* One read for the current setup, if one is due. */
+static void npPollSetup(uint32_t now) {
+  bool pollShown = npRt->shown < npCur->mediaCount && npPolled(npCurMedia);
+  bool pollVolume = npPolled(npCur->volume);
+  bool volumeIsShown = pollShown && npSameEntry(npCurMedia, npCur->volume);
+  if (pollVolume && (npDue(npRefreshVolumeAtMs, now) || npDue(npRefreshVolumeLateMs, now))) {
+    npReadVolume();
+  } else if (pollShown && npDue(npRefreshMediaAtMs, now)) {
+    npReadMedia(npRt->shown);
+  } else if (!npPollNextMs || (int32_t)(now - npPollNextMs) >= 0) {
+    // In turn: the source on screen, the audio, the source on screen, the
+    // audio, then one of the others - so a second source starting to play
+    // is noticed within a few rounds.
+    uint8_t turn = npPollTurn++ % 5;
+    bool others = false;
+    for (uint8_t m = 0; m < npCur->mediaCount; m++) {
+      if (m != npRt->shown && npPolled(npCur->media[m])) others = true;
+    }
+    if (turn == 4 && others) {
+      for (uint8_t step = 0; step < npCur->mediaCount; step++) {
+        uint8_t m = (uint8_t)((npRt->pollOther + 1 + step) % npCur->mediaCount);
+        if (m == npRt->shown || !npPolled(npCur->media[m])) continue;
+        npRt->pollOther = m;
+        npReadMedia(m);
+        break;
+      }
+    } else if ((turn % 2 == 0 || !pollVolume || volumeIsShown) && pollShown) {
+      npReadMedia(npRt->shown);
+    } else if (pollVolume) {
+      npReadVolume();
+    }
+    npPollNextMs = now + ((pollShown && pollVolume && !volumeIsShown) ? 2000UL : 2500UL);
+  }
+  npPickShown();
+}
+
+/* One round of reads across the named widgets that need them. The caller has
+   the station connected. */
+void pollNowPlaying(uint32_t now) {
+  if (!npStorageReady()) return;
+  uint8_t keep = npCurIndex;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    if (!npSetupPolled(i) || !npSetupWanted(i)) continue;
+    npUse(i);
+    npPollSetup(now);
+  }
+  npUse(keep);
+}
+
+/* Sources that arrive rather than being fetched, for the current setup. */
+static void npServiceLocalSourcesFor() {
+  for (uint8_t m = 0; m < npCur->mediaCount; m++) {
+    const NpSourceSettings &half = npCur->media[m];
+    NpEntityState &state = npRt->media[m];
+    if (half.type == NP_SRC_CAST) npFromChromecast(state, half);
+    else if (half.type == NP_SRC_MQTT) npMqttFromLiveStates(state, half, npRt->mqttSeen[m]);
+    else if (half.type == NP_SRC_NONE && half.keysDevice[0]) npFromNothing(state, half, 0);
+  }
+  const NpSourceSettings &audio = npCur->volume;
+  if (audio.type == NP_SRC_MQTT) npMqttFromLiveStates(npRt->volume, audio, npRt->mqttSeen[NP_MAX_MEDIA]);
+  else if (audio.type == NP_SRC_NONE && audio.keysDevice[0]) npFromNothing(npRt->volume, audio, 1);
+  npPickShown();
+}
+
 static void npServiceLocalSources(uint32_t now) {
   static uint32_t lastMs = 0;
   if (now - lastMs < 400UL) return;
   lastMs = now;
-  const NpSourceSettings *halves[2] = { &npSettings.media, &npSettings.volume };
-  NpEntityState *states[2] = { &npMedia, &npVolume };
-  for (uint8_t i = 0; i < 2; i++) {
-    const NpSourceSettings &half = *halves[i];
-    if (half.type == NP_SRC_CAST) npFromChromecast(*states[i], half);
-    else if (half.type == NP_SRC_MQTT) npMqttFromLiveStates(*states[i], half);
-    else if (half.type == NP_SRC_NONE && half.keysDevice[0]) npFromNothing(*states[i], half, i);
+  uint8_t keep = npCurIndex;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    if (!npSetupWanted(i)) continue;
+    npUse(i);
+    npServiceLocalSourcesFor();
   }
+  npUse(keep);
 }
 
-/* Whether the Media widget's Chromecast feed should run for this widget. */
+/* The Chromecast device a named widget on screen reads, if any. */
+const char *nowPlayingCastDevice() {
+  if (displaySleeping || !npStorageReady()) return nullptr;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    if (!nowPlayingSetupOnScreen(i)) continue;
+    for (uint8_t m = 0; m < npSetups[i].mediaCount; m++) {
+      const NpSourceSettings &half = npSetups[i].media[m];
+      if (half.type == NP_SRC_CAST) return half.keysDevice;
+    }
+  }
+  return nullptr;
+}
+
+/* Whether the Media widget's Chromecast feed should run for a Now Playing widget. */
 bool nowPlayingWantsCast() {
-  return npSettings.media.type == NP_SRC_CAST && !displaySleeping && nowPlayingOnScreen();
+  return nowPlayingCastDevice() != nullptr;
 }
 
 /* After a command, read back soon - and again a moment later, because a
@@ -1314,7 +1550,7 @@ static bool npSelectInput(uint8_t index) {
   }
   if (sent) {
     strlcpy(npVolume.source, label, sizeof(npVolume.source));
-    strlcpy(npGuessedInput[1], label, sizeof(npGuessedInput[1]));
+    strlcpy(npRt->guessedInput[1], label, sizeof(npRt->guessedInput[1]));
     npDirty = true;
   }
   return sent;
@@ -1324,7 +1560,7 @@ void npShowVolumePopup(const char *action);
 void npShowReceiverPanel(bool show);
 
 void runNowPlayingAction(uint8_t action, uint8_t index) {
-  const NpSourceSettings &media = npSettings.media;
+  const NpSourceSettings &media = npCurMedia;
   const NpSourceSettings &volume = npSettings.volume;
   switch (action) {
     case NP_ACT_PLAY_PAUSE:
@@ -1465,14 +1701,33 @@ static const char *npVolumeKeyAction(const DeviceCommand &command) {
   page, key or transport it came from - so a hardware volume key mapped to
   the receiver brings up the pop-up just as the widget's own keys do.
 */
-void nowPlayingNoteCommand(const DeviceCommand &command, bool sent) {
-  if (!sent) return;
-  const NpSourceSettings &media = npSettings.media;
+/* Which named widget the volume pop-up speaks for: the one on the current
+   activity's page, else the one most recently on screen, else the first. */
+uint8_t npPopupSetupFor() {
+  if (activityTiles && activityTileCounts && activeActivity >= 0 &&
+      activeActivity < (int)ACTIVITY_COUNT) {
+    for (uint8_t t = 0; t < activityTileCounts[activeActivity]; t++) {
+      const Tile &tile = activityTiles[activeActivity][t];
+      if (tile.kind == Tile::WIDGET && tile.widgetKind == WIDGET_NOWPLAYING &&
+          tile.widgetCustom < npSetupCount) return tile.widgetCustom;
+    }
+  }
+  if (npLastShownSetup >= 0 && npLastShownSetup < npSetupCount) return (uint8_t)npLastShownSetup;
+  return 0;
+}
+
+/* For the current setup: whether a sent command reached one of its media
+   sources or its audio half, and what the pop-up should say. */
+static void npMatchCommand(const DeviceCommand &command, bool &forMedia, bool &forVolume,
+                           const char *&action) {
   const NpSourceSettings &volume = npSettings.volume;
   int8_t volumeKey = npMappedKeyFor(volume, command);
-  bool forMedia = npMappedKeyFor(media, command) >= 0;
-  bool forVolume = volumeKey >= 0;
-  const char *action = nullptr;
+  forVolume = volumeKey >= 0;
+  forMedia = false;
+  action = nullptr;
+  for (uint8_t m = 0; m < npCur->mediaCount; m++) {
+    if (npMappedKeyFor(npCur->media[m], command) >= 0) forMedia = true;
+  }
   if (volumeKey == NPK_VOLUME_UP) action = "Volume up";
   else if (volumeKey == NPK_VOLUME_DOWN) action = "Volume down";
   else if (volumeKey == NPK_MUTE) action = "Mute";
@@ -1480,20 +1735,26 @@ void nowPlayingNoteCommand(const DeviceCommand &command, bool sent) {
   if (command.kind == DeviceCommand::HOMEASSISTANT && command.haEntityId && command.haService &&
       strncmp(command.haService, "media_player.", 13) == 0) {
     const char *service = command.haService + 13;
-    if (media.type == NP_SRC_HA && media.entity[0] && !strcmp(command.haEntityId, media.entity)) {
-      forMedia = true;
+    for (uint8_t m = 0; m < npCur->mediaCount; m++) {
+      const NpSourceSettings &media = npCur->media[m];
+      if (media.type == NP_SRC_HA && media.entity[0] && !strcmp(command.haEntityId, media.entity)) {
+        forMedia = true;
+      }
     }
     if (volume.type == NP_SRC_HA && volume.entity[0] && !strcmp(command.haEntityId, volume.entity)) {
       forVolume = true;
       if (!strcmp(service, "volume_up")) action = "Volume up";
       else if (!strcmp(service, "volume_down")) action = "Volume down";
-      else if (!strcmp(service, "volume_mute") || !strcmp(service, "volume_set")) action = "Mute";
-      if (!strcmp(service, "volume_set")) action = "Volume";
+      else if (!strcmp(service, "volume_mute")) action = "Mute";
+      else if (!strcmp(service, "volume_set")) action = "Volume";
     }
   }
   if (command.kind == DeviceCommand::HOMEBRIDGE) {
-    if (media.type == NP_SRC_HOMEBRIDGE && !strcmp(command.homebridgeAccessoryId, media.accessory)) {
-      forMedia = true;
+    for (uint8_t m = 0; m < npCur->mediaCount; m++) {
+      const NpSourceSettings &media = npCur->media[m];
+      if (media.type == NP_SRC_HOMEBRIDGE && !strcmp(command.homebridgeAccessoryId, media.accessory)) {
+        forMedia = true;
+      }
     }
     if (volume.type == NP_SRC_HOMEBRIDGE && !strcmp(command.homebridgeAccessoryId, volume.accessory)) {
       forVolume = true;
@@ -1503,23 +1764,50 @@ void nowPlayingNoteCommand(const DeviceCommand &command, bool sent) {
       else if (!strcmp(c, "Volume")) action = "Volume";
     }
   }
-  // One remote per room: a volume key aimed anywhere - the TV's or the
-  // Roku's own volume keys, which reach the receiver over HDMI-CEC - still
-  // changes this room's volume. Show it, and read the receiver back.
-  if (!action) {
-    action = npVolumeKeyAction(command);
-    if (action) forVolume = true;
+}
+
+/*
+  Every command the remote sends passes through here once sent, whichever
+  page, key or transport it came from - so a hardware volume key mapped to
+  the receiver brings up the pop-up just as the widget's own keys do.
+*/
+void nowPlayingNoteCommand(const DeviceCommand &command, bool sent) {
+  if (!sent || !npStorageReady()) return;
+  uint8_t keep = npCurIndex;
+  uint8_t popupSetup = npPopupSetupFor();
+  const char *popupAction = nullptr;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    npUse(i);
+    bool forMedia, forVolume;
+    const char *action;
+    npMatchCommand(command, forMedia, forVolume, action);
+    // One remote per room: a volume key aimed anywhere - the TV's or the
+    // Roku's own volume keys, which reach the receiver over HDMI-CEC - still
+    // changes this room's volume. Shown for the widget the pop-up speaks for.
+    if (i == popupSetup && !action && npHalfActive(npSettings.volume)) {
+      action = npVolumeKeyAction(command);
+      if (action) forVolume = true;
+    }
+    if (forMedia) npRequestRefresh(true, false);
+    if (forVolume) npRequestRefresh(false, true);
+    if (i == popupSetup) popupAction = action;
   }
-  if (forMedia) npRequestRefresh(true, false);
-  if (forVolume) npRequestRefresh(false, true);
-  if (action) npShowVolumePopup(action);
+  npUse(keep);
+  if (popupAction) {
+    npPopupSetupIndex = popupSetup;
+    npShowVolumePopup(popupAction);
+  }
 }
 
 /* -------------------------------------------------------------- faces */
 
+/* The setup a face being built belongs to, for its keys. */
+uint8_t npBuildingSetup = 0;
+
 static void npActionEvent(lv_event_t *event) {
   if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
   uintptr_t data = (uintptr_t)lv_event_get_user_data(event);
+  npPendingSetup = (uint8_t)((data >> 16) & 0xFF);
   npPendingIndex = (uint8_t)((data >> 8) & 0xFF);
   npPendingAction = (uint8_t)(data & 0xFF);
   lastWakeMs = millis();
@@ -1551,7 +1839,8 @@ static lv_obj_t *npKey(lv_obj_t *parent, int x, int y, int w, int h, const char 
   lv_obj_add_flag(key, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_clear_flag(key, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(key, npActionEvent, LV_EVENT_CLICKED,
-                      (void *)(uintptr_t)(((uintptr_t)index << 8) | action));
+                      (void *)(uintptr_t)(((uintptr_t)npBuildingSetup << 16) |
+                                          ((uintptr_t)index << 8) | action));
   lv_obj_t *label = lv_label_create(key);
   lv_label_set_text(label, text);
   lv_obj_set_style_text_font(label, font, 0);
@@ -1777,16 +2066,21 @@ static void npBuildVolumeBlock(NowPlayingUi *ui, lv_obj_t *parent, int y, int h,
   expanded view.
 */
 NowPlayingUi *buildNowPlayingFace(lv_obj_t *parent, int width, int height, bool expanded,
-                                  bool slim) {
+                                  bool slim, uint8_t setup) {
+  if (!npUse(setup)) return nullptr;
+  setup = npCurIndex;   // an id that no longer exists falls back to the first
   NowPlayingUi *ui = (NowPlayingUi *)lv_mem_alloc(sizeof(NowPlayingUi));
   if (!ui) return nullptr;
   memset(ui, 0, sizeof(*ui));
+  ui->setup = setup;
+  npBuildingSetup = setup;
+  npLastShownSetup = (int8_t)setup;
   ui->expanded = expanded;
   ui->slim = slim && !expanded;
   ui->layout = expanded || height >= 190 ? NP_LAYOUT_FULL
              : ui->slim || height < 70 ? NP_LAYOUT_SLIM
              : height < 120 ? NP_LAYOUT_TWO : NP_LAYOUT_THREE;
-  ui->hasMedia = npHalfActive(npSettings.media);
+  ui->hasMedia = npHalfActive(npCurMedia);
   ui->hasVolume = npHalfActive(npSettings.volume);
   ui->width = (int16_t)width;
   ui->height = (int16_t)height;
@@ -1964,6 +2258,15 @@ static void npRebuildReceiverLists(NowPlayingUi *ui) {
   int inner = ui->width - 24;
   int half = (inner - 6) / 2;
 
+  // A name too long for half the panel ("STEREO (Front 2 Speakers Only)")
+  // gets the whole width rather than being cut off; flex wrap puts it on a
+  // line of its own.
+  auto keyWidth = [&](const char *text) -> int {
+    lv_point_t size;
+    lv_txt_get_size(&size, text, &lv_font_montserrat_12, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return size.x > half - 12 ? inner : half;
+  };
+
   auto heading = [&](const char *text) -> lv_obj_t * {
     lv_obj_t *label = makeWidgetLabel(ui->rxList, text, 0, 0, &lv_font_montserrat_10, muted, inner);
     lv_obj_add_flag(label, LV_OBJ_FLAG_FLEX_IN_NEW_TRACK);
@@ -1974,7 +2277,7 @@ static void npRebuildReceiverLists(NowPlayingUi *ui) {
   if (npSettings.allowInput && inputs) {
     heading("Input");
     for (uint8_t i = 0; i < inputs; i++) {
-      lv_obj_t *key = npKey(ui->rxList, 0, 0, half, 26, npInputLabel(i),
+      lv_obj_t *key = npKey(ui->rxList, 0, 0, keyWidth(npInputLabel(i)), 26, npInputLabel(i),
                             &lv_font_montserrat_12, NP_ACT_SOURCE, i);
       if (i == 0) lv_obj_add_flag(key, LV_OBJ_FLAG_FLEX_IN_NEW_TRACK);
       ui->rxSourceBtns[ui->rxSourceCount++] = key;
@@ -1985,8 +2288,8 @@ static void npRebuildReceiverLists(NowPlayingUi *ui) {
   if (npSettings.allowSoundMode && npVolume.soundModeCount && npSettings.volume.type == NP_SRC_HA) {
     heading("Sound mode");
     for (uint8_t i = 0; i < npVolume.soundModeCount; i++) {
-      lv_obj_t *key = npKey(ui->rxList, 0, 0, half, 26, npVolume.soundModes[i],
-                            &lv_font_montserrat_12, NP_ACT_SOUND_MODE, i);
+      lv_obj_t *key = npKey(ui->rxList, 0, 0, keyWidth(npVolume.soundModes[i]), 26,
+                            npVolume.soundModes[i], &lv_font_montserrat_12, NP_ACT_SOUND_MODE, i);
       if (i == 0) lv_obj_add_flag(key, LV_OBJ_FLAG_FLEX_IN_NEW_TRACK);
       ui->rxSoundBtns[ui->rxSoundCount++] = key;
     }
@@ -2029,15 +2332,32 @@ static void npRefreshArt(NowPlayingUi *ui, bool show) {
 
 /* Input and sound mode (or the state), optionally after the receiver's name:
    "Den Denon - TV Audio - Dolby Atmos", "Muted - TV Audio". */
+/*
+  What the audio section says about itself. Three cases:
+   - normal: the receiver's name, then its input and sound mode;
+   - the same entry as the source on screen (the Onkyo playing AirPlay
+     itself): no name or input again, just the sound mode;
+   - "Hide label": nothing but "Muted" when muted.
+  Off and offline always say so.
+*/
+static bool npAudioIsShownSource() {
+  return npCur->mediaCount && npRt->shown < npCur->mediaCount &&
+         npSameEntry(npCurMedia, npCur->volume);
+}
+
 static void npVolumeDetail(char *out, size_t size, bool withName) {
   const NpEntityState &v = npVolume;
+  bool hide = npSettings.hideAudioLabel;
+  bool same = !hide && npAudioIsShownSource();
+  if (hide || same) withName = false;
   const char *name = npHalfName(npSettings.volume, v, "Receiver");
+  bool muted = v.muted && !v.guessed;
   if (!v.valid) { snprintf(out, size, "%s%s", withName ? name : "", withName ? " - offline" : "Offline"); return; }
   if (npIsOff(v)) { snprintf(out, size, withName ? "%s is off" : "Off", name); return; }
+  if (hide) { strlcpy(out, muted ? "Muted" : "", size); return; }
   String text = withName ? String(name) : String();
-  bool muted = v.muted && !v.guessed;
   if (muted && !withName) text = "Muted";
-  if (v.source[0]) { if (text.length()) text += " - "; text += v.source; }
+  if (v.source[0] && !same) { if (text.length()) text += " - "; text += v.source; }
   if (muted && withName) { text += " - Muted"; }
   else if (!muted && v.soundMode[0]) { if (text.length()) text += " - "; text += v.soundMode; }
   strlcpy(out, text.c_str(), size);
@@ -2052,7 +2372,7 @@ static void npVolumeDetail(char *out, size_t size, bool withName) {
 static void npMediaLines(const NpEntityState &m, char *title, size_t titleSize, char *line,
                          size_t lineSize, bool withPlayer) {
   bool off = npIsOff(m);
-  const char *name = npHalfName(npSettings.media, m, "Media player");
+  const char *name = npHalfName(npCurMedia, m, "Media player");
   const char *status = !m.valid ? "Not reachable"
     : off ? "Off" : npStateIs(m, "idle") ? "Idle"
     : npStateIs(m, "paused") ? "Paused"
@@ -2076,7 +2396,8 @@ static void npMediaLines(const NpEntityState &m, char *title, size_t titleSize, 
 }
 
 void refreshNowPlayingUi(NowPlayingUi *ui) {
-  if (!ui) return;
+  if (!ui || !npUse(ui->setup)) return;
+  npBuildingSetup = ui->setup;   // for the picker keys rebuilt below
   // Events and polls recolour these labels long after the page was drawn.
   TextThemeScope textScope(textThemeFor(ui->mediaPanel ? ui->mediaPanel : ui->volValue));
   char text[128];
@@ -2092,7 +2413,7 @@ void refreshNowPlayingUi(NowPlayingUi *ui) {
     if (full) {
       // The full face names the player above the artwork, so the line under
       // the title leaves it out.
-      const char *name = npHalfName(npSettings.media, m, "Media player");
+      const char *name = npHalfName(npCurMedia, m, "Media player");
       setWidgetLabelText(ui->tag, name);
     }
     setWidgetLabelText(ui->subtitle, line);
@@ -2120,13 +2441,13 @@ void refreshNowPlayingUi(NowPlayingUi *ui) {
     else npRefreshArt(ui, npSettings.artwork && !off && m.valid);
 
     if (full) {
-      bool canTurnOn = off && m.valid && npHasKey(npSettings.media, NPK_POWER_ON) &&
-                       (npSettings.media.type != NP_SRC_HA || (m.supported & NP_FEATURE_TURN_ON));
+      bool canTurnOn = off && m.valid && npHasKey(npCurMedia, NPK_POWER_ON) &&
+                       (npCurMedia.type != NP_SRC_HA || (m.supported & NP_FEATURE_TURN_ON));
       npSetHidden(ui->transport, off);
       npSetHidden(ui->mediaPowerBtn, !canTurnOn);
       if (ui->playLabel) setWidgetLabelText(ui->playLabel, playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
-      bool seek = npSettings.media.type == NP_SRC_HA && (m.supported & NP_FEATURE_SEEK) &&
-                  m.hasPosition && !npSettings.media.keys[NPK_NEXT][0];
+      bool seek = npCurMedia.type == NP_SRC_HA && (m.supported & NP_FEATURE_SEEK) &&
+                  m.hasPosition && !npCurMedia.keys[NPK_NEXT][0];
       if (ui->backLabel) setWidgetLabelText(ui->backLabel, seek ? "-10s" : LV_SYMBOL_PREV);
       if (ui->forwardLabel) setWidgetLabelText(ui->forwardLabel, seek ? "+10s" : LV_SYMBOL_NEXT);
     }
@@ -2151,12 +2472,20 @@ void refreshNowPlayingUi(NowPlayingUi *ui) {
       lv_obj_set_style_text_color(ui->volIcon, off ? widgetMutedColour()
                                   : muted ? npMutedRed() : npVolumeColour(), 0);
     }
-    if (ui->volDetail) {
+    bool nameShown = !npSettings.hideAudioLabel && !npAudioIsShownSource();
+    if (ui->volDetail && nameShown) {
       // Name on one line, input and sound mode (or "Muted") under it.
       setWidgetLabelText(ui->volLabel, npHalfName(npSettings.volume, v, "Receiver"));
       npVolumeDetail(text, sizeof(text), false);
       setWidgetLabelText(ui->volDetail, text);
+      lv_obj_set_style_text_color(ui->volLabel, textPrimary(), 0);
       lv_obj_set_style_text_color(ui->volDetail, muted ? npMutedRed() : widgetMutedColour(), 0);
+    } else if (ui->volDetail) {
+      // No name: what is left (sound mode, or "Muted") moves up into its place.
+      npVolumeDetail(text, sizeof(text), false);
+      setWidgetLabelText(ui->volLabel, text);
+      setWidgetLabelText(ui->volDetail, "");
+      lv_obj_set_style_text_color(ui->volLabel, muted ? npMutedRed() : widgetMutedColour(), 0);
     } else if (ui->volLabel) {
       npVolumeDetail(text, sizeof(text), true);
       setWidgetLabelText(ui->volLabel, text);
@@ -2215,6 +2544,7 @@ void npShowReceiverPanel(bool show) {
 
 static void npShowReceiverPanelOn(WidgetInstance &instance, bool show) {
   if (instance.kind != WIDGET_NOWPLAYING || !instance.nowPlayingUi) return;
+  if (instance.nowPlayingUi->setup != npCurIndex) return;   // the widget whose key it was
   if (!instance.card || !lv_obj_is_valid(instance.card)) return;
   NowPlayingUi *ui = instance.nowPlayingUi;
   if (!ui->rxPanel || !ui->mediaPanel) return;
@@ -2229,8 +2559,17 @@ static void npShowReceiverPanelOn(WidgetInstance &instance, bool show) {
 
 char npPopupAction[24] = "";
 
+static void npRefreshPopupFor();
+
 static void npRefreshPopup() {
-  if (!npPopup || !lv_obj_is_valid(npPopup)) return;
+  if (!npPopup || !lv_obj_is_valid(npPopup) || !npStorageReady()) return;
+  uint8_t keep = npCurIndex;
+  npUse(npPopupSetupIndex);
+  npRefreshPopupFor();
+  npUse(keep);
+}
+
+static void npRefreshPopupFor() {
   const NpEntityState &v = npVolume;
   char level[24];
   npFormatVolume(level, sizeof(level), v);
@@ -2264,7 +2603,18 @@ void npHideVolumePopup() {
 
 bool nowPlayingFullOnScreen();
 
+static void npShowVolumePopupFor(const char *action);
+
+/* Shows the pop-up for the widget npPopupSetupIndex names. */
 void npShowVolumePopup(const char *action) {
+  if (!npStorageReady()) return;
+  uint8_t keep = npCurIndex;
+  npUse(npPopupSetupIndex);
+  npShowVolumePopupFor(action);
+  npUse(keep);
+}
+
+static void npShowVolumePopupFor(const char *action) {
   if (!npSettings.volumePopup || !npHalfActive(npSettings.volume)) {
     Serial.printf("Now Playing: no pop-up for %s (%s)\n", action ? action : "volume",
                   !npSettings.volumePopup ? "switched off" : "no volume device set");
@@ -2310,13 +2660,40 @@ bool nowPlayingExpandedOpen() {
   return false;
 }
 
+/* Whether the pop-up's widget is already on screen at full size, showing
+   the level itself. */
 bool nowPlayingFullOnScreen() {
-  if (nowPlayingExpandedOpen()) return true;
+  uint8_t setup = npPopupSetupIndex;
+  if (widgetExpandedOverlay && !widgetExpandedClosing) {
+    for (uint8_t i = 0; i < widgetExpandedInstanceCount; i++) {
+      const WidgetInstance &instance = widgetExpandedInstances[i];
+      if (instance.kind == WIDGET_NOWPLAYING && instance.nowPlayingUi &&
+          instance.nowPlayingUi->setup == setup) return true;
+    }
+  }
   for (uint8_t i = 0; i < widgetInstanceCount; i++) {
     const WidgetInstance &instance = widgetInstances[i];
     if (instance.kind == WIDGET_NOWPLAYING && instance.nowPlayingUi && instance.card &&
-        lv_obj_is_valid(instance.card) && instance.nowPlayingUi->layout == NP_LAYOUT_FULL &&
+        lv_obj_is_valid(instance.card) && instance.nowPlayingUi->setup == setup &&
+        instance.nowPlayingUi->layout == NP_LAYOUT_FULL &&
         instance.nowPlayingUi->hasVolume) return true;
+  }
+  return false;
+}
+
+/* Whether named widget `index` is on screen, on the page or opened. */
+bool nowPlayingSetupOnScreen(uint8_t index) {
+  if (widgetExpandedOverlay && !widgetExpandedClosing) {
+    for (uint8_t i = 0; i < widgetExpandedInstanceCount; i++) {
+      const WidgetInstance &instance = widgetExpandedInstances[i];
+      if (instance.kind == WIDGET_NOWPLAYING && instance.nowPlayingUi &&
+          instance.nowPlayingUi->setup == index) return true;
+    }
+  }
+  for (uint8_t i = 0; i < widgetInstanceCount; i++) {
+    const WidgetInstance &instance = widgetInstances[i];
+    if (instance.kind == WIDGET_NOWPLAYING && instance.nowPlayingUi && instance.card &&
+        lv_obj_is_valid(instance.card) && instance.nowPlayingUi->setup == index) return true;
   }
   return false;
 }
@@ -2354,7 +2731,7 @@ void serviceNowPlaying(uint32_t now) {
   if (action != NP_ACT_NONE) {
     uint8_t index = npPendingIndex;
     npPendingAction = NP_ACT_NONE;
-    runNowPlayingAction(action, index);
+    if (npUse(npPendingSetup)) runNowPlayingAction(action, index);
   }
   if (npPopup && npPopupUntilMs && (int32_t)(now - npPopupUntilMs) >= 0) npHideVolumePopup();
   if (displaySleeping) {
@@ -2403,6 +2780,7 @@ static void npLoadHalf(NpSourceSettings &half, JsonObjectConst raw, const char *
     return;
   }
   half.type = npSourceFromName(raw["source"] | "none");
+  strlcpy(half.device, raw["device"] | "", sizeof(half.device));
   strlcpy(half.entity, raw["entity"] | "", sizeof(half.entity));
   strlcpy(half.accessory, raw["accessory"] | "", sizeof(half.accessory));
   copyDisplayTextAscii(raw["name"] | "", half.name, sizeof(half.name));
@@ -2432,47 +2810,132 @@ static bool npHalfSameSource(const NpSourceSettings &a, const NpSourceSettings &
          !strcmp(a.mqttJsonTopic, b.mqttJsonTopic) && !strcmp(a.keysDevice, b.keysDevice);
 }
 
-/* Reads widgets.nowPlaying from the config. */
-void loadNowPlayingSettings(JsonObjectConst widgets) {
-  JsonObjectConst settings = widgets["nowPlaying"].as<JsonObjectConst>();
-  // Built in PSRAM: a whole second copy of the settings has no business in
-  // internal RAM for the moment it takes to compare them.
-  NowPlayingSettings *built = (NowPlayingSettings *)(psramFound()
-    ? ps_malloc(sizeof(NowPlayingSettings)) : malloc(sizeof(NowPlayingSettings)));
-  if (!built) return;
-  NowPlayingSettings &next = *built;
-  npDefaultSettings(next);
-  if (!settings.isNull()) {
-    // Builds before source types wrote two bare entity ids.
-    npLoadHalf(next.media, settings["media"].as<JsonObjectConst>(), settings["mediaEntity"] | "");
-    npLoadHalf(next.volume, settings["volume"].as<JsonObjectConst>(), settings["volumeEntity"] | "");
-    next.allowInput = settings["allowInput"] | true;
-    next.allowSoundMode = settings["allowSoundMode"] | true;
-    next.volumeDb = strcmp(settings["volumeUnit"] | "db", "percent") != 0;
-    next.dbOffset = constrain((float)(settings["dbOffset"] | -80.0f), -120.0f, 20.0f);
-    next.volumePopup = settings["volumePopup"] | true;
-    next.artwork = settings["artwork"] | true;
+static bool npSetupSameSources(const NpSetup &a, const NpSetup &b) {
+  if (a.mediaCount != b.mediaCount || !npHalfSameSource(a.volume, b.volume)) return false;
+  for (uint8_t m = 0; m < a.mediaCount; m++) {
+    if (!npHalfSameSource(a.media[m], b.media[m])) return false;
+  }
+  return true;
+}
+
+static bool npSetupUsesMqtt(const NpSetup &setup) {
+  if (setup.volume.type == NP_SRC_MQTT) return true;
+  for (uint8_t m = 0; m < setup.mediaCount; m++) if (setup.media[m].type == NP_SRC_MQTT) return true;
+  return false;
+}
+
+/* One named widget from its JSON: {id, name, media:[half, ...], volume:half,
+   hideAudioLabel, allowInput, ...}. */
+static void npLoadSetup(NpSetup &setup, JsonObjectConst raw, uint8_t index) {
+  npDefaultSetup(setup);
+  const char *id = raw["id"] | "";
+  if (id[0]) strlcpy(setup.id, id, sizeof(setup.id));
+  else snprintf(setup.id, sizeof(setup.id), "np%u", (unsigned)(index + 1));
+  copyDisplayTextAscii(raw["name"] | "Now Playing", setup.name, sizeof(setup.name));
+  JsonVariantConst media = raw["media"];
+  if (media.is<JsonArrayConst>()) {
+    for (JsonObjectConst half : media.as<JsonArrayConst>()) {
+      if (setup.mediaCount >= NP_MAX_MEDIA) break;
+      npLoadHalf(setup.media[setup.mediaCount], half, nullptr);
+      if (npHalfActive(setup.media[setup.mediaCount])) setup.mediaCount++;
+    }
   } else {
-    next.media.type = NP_SRC_NONE;
-    next.volume.type = NP_SRC_NONE;
+    // Builds before named widgets: one half, or a bare Home Assistant entity.
+    npLoadHalf(setup.media[0], media.as<JsonObjectConst>(), raw["mediaEntity"] | "");
+    if (npHalfActive(setup.media[0])) setup.mediaCount = 1;
   }
-  if (!npHalfSameSource(next.media, npSettings.media)) {
-    memset(&npMedia, 0, sizeof(npMedia));
-    npArtRelease();
+  npLoadHalf(setup.volume, raw["volume"].as<JsonObjectConst>(), raw["volumeEntity"] | "");
+  setup.hideAudioLabel = raw["hideAudioLabel"] | false;
+  setup.allowInput = raw["allowInput"] | true;
+  setup.allowSoundMode = raw["allowSoundMode"] | true;
+  setup.volumeDb = strcmp(raw["volumeUnit"] | "db", "percent") != 0;
+  setup.dbOffset = constrain((float)(raw["dbOffset"] | -80.0f), -120.0f, 20.0f);
+  setup.volumePopup = raw["volumePopup"] | true;
+  setup.artwork = raw["artwork"] | true;
+}
+
+/* The named widget a page item points at, by id; the first if it names none
+   or one since deleted. */
+uint8_t npSetupIndexById(const char *id) {
+  if (!npStorageReady() || !id || !id[0]) return 0;
+  for (uint8_t i = 0; i < npSetupCount; i++) {
+    if (strcmp(npSetups[i].id, id) == 0) return i;
   }
-  if (!npHalfSameSource(next.volume, npSettings.volume)) memset(&npVolume, 0, sizeof(npVolume));
-  bool mqttChanged = next.media.type == NP_SRC_MQTT || next.volume.type == NP_SRC_MQTT ||
-                     npSettings.media.type == NP_SRC_MQTT || npSettings.volume.type == NP_SRC_MQTT;
-  npSettings = next;
-  free(built);
-  npPollNextMs = 0;
-  if (mqttChanged) nowPlayingMqttTopicsChanged();
-  Serial.printf("Widgets: now playing media=%s %s, volume=%s %s (keys %s/%s, %s)\n",
-                npSourceName(npSettings.media.type),
-                npSettings.media.entity[0] ? npSettings.media.entity : npSettings.media.accessory,
-                npSourceName(npSettings.volume.type),
-                npSettings.volume.entity[0] ? npSettings.volume.entity : npSettings.volume.accessory,
-                npSettings.media.keysDevice[0] ? npSettings.media.keysDevice : "-",
-                npSettings.volume.keysDevice[0] ? npSettings.volume.keysDevice : "-",
-                npSettings.volumeDb ? "dB" : "%");
+  return 0;
+}
+
+/*
+  Reads widgets.nowPlaying: {setups:[...]} from this build on, or the single
+  set of sources earlier builds wrote, which becomes the first named widget.
+  A widget whose id and sources are unchanged keeps what it already knows.
+*/
+void loadNowPlayingSettings(JsonObjectConst widgets) {
+  if (!npStorageReady()) return;
+  JsonObjectConst settings = widgets["nowPlaying"].as<JsonObjectConst>();
+  JsonArrayConst list = settings["setups"].as<JsonArrayConst>();
+  uint8_t count = 1;
+  if (!list.isNull()) count = constrain((int)list.size(), 1, (int)NP_MAX_SETUPS);
+  NpSetup *setups = (NpSetup *)(psramFound() ? ps_calloc(count, sizeof(NpSetup))
+                                             : calloc(count, sizeof(NpSetup)));
+  NpRuntime *runtimes = (NpRuntime *)(psramFound() ? ps_calloc(count, sizeof(NpRuntime))
+                                                   : calloc(count, sizeof(NpRuntime)));
+  if (!setups || !runtimes) {
+    free(setups); free(runtimes);
+    Serial.println("Now Playing: no memory for the named widgets");
+    return;
+  }
+  if (!list.isNull() && list.size()) {
+    uint8_t i = 0;
+    for (JsonObjectConst raw : list) {
+      if (i >= count) break;
+      npLoadSetup(setups[i], raw, i);
+      i++;
+    }
+  } else if (!settings.isNull()) {
+    npLoadSetup(setups[0], settings, 0);   // the earlier single widget
+    strlcpy(setups[0].id, "np1", sizeof(setups[0].id));
+  } else {
+    npDefaultSetup(setups[0]);
+    strlcpy(setups[0].id, "np1", sizeof(setups[0].id));
+    strlcpy(setups[0].name, "Now Playing", sizeof(setups[0].name));
+  }
+
+  bool mqtt = false;
+  for (uint8_t i = 0; i < count; i++) {
+    runtimes[i].lastPlayed = 0xFF;
+    if (npSetupUsesMqtt(setups[i])) mqtt = true;
+    // Carry over what a widget with the same id and sources already knows.
+    for (uint8_t old = 0; old < npSetupCount; old++) {
+      if (strcmp(npSetups[old].id, setups[i].id) || !npSetupSameSources(npSetups[old], setups[i])) continue;
+      runtimes[i] = npRuntimes[old];
+      npRuntimes[old].artPixels = nullptr;   // moved, not freed below
+      runtimes[i].pollNextMs = 0;
+      break;
+    }
+  }
+  for (uint8_t old = 0; old < npSetupCount; old++) {
+    if (npSetupUsesMqtt(npSetups[old])) mqtt = true;
+    if (npRuntimes[old].artPixels) free(npRuntimes[old].artPixels);
+  }
+  // Point the art descriptors at the pixels in their new home.
+  for (uint8_t i = 0; i < count; i++) {
+    if (runtimes[i].artPixels) runtimes[i].artDescriptor.data = runtimes[i].artPixels;
+  }
+  free(npSetups);
+  free(npRuntimes);
+  npSetups = setups;
+  npRuntimes = runtimes;
+  npSetupCount = count;
+  npLastShownSetup = -1;
+  npPopupSetupIndex = 0;
+  npUse(0);
+  if (mqtt) nowPlayingMqttTopicsChanged();
+  for (uint8_t i = 0; i < count; i++) {
+    const NpSetup &setup = setups[i];
+    Serial.printf("Widgets: now playing \"%s\" (%s): %u source%s, audio %s %s%s\n",
+                  setup.name, setup.id, (unsigned)setup.mediaCount, setup.mediaCount == 1 ? "" : "s",
+                  npSourceName(setup.volume.type),
+                  setup.volume.entity[0] ? setup.volume.entity : setup.volume.accessory,
+                  setup.hideAudioLabel ? ", label hidden" : "");
+  }
 }
