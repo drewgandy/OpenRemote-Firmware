@@ -4210,6 +4210,8 @@
 .commandPill.rf:hover{border-color:rgba(255,69,58,.75);color:#fff;background:rgba(255,69,58,.22)}
 .connectionBadge.bluetooth{color:#91c7ff;background:rgba(47,140,255,.12);border:1px solid rgba(47,140,255,.30)}
 .connectionBadge.homebridge{color:#b9efc8;background:rgba(48,209,88,.11);border:1px solid rgba(48,209,88,.27)}
+.connectionBadge.homeassistant{color:#8fe3f0;background:rgba(24,188,242,.11);border:1px solid rgba(24,188,242,.30)}
+.connectionBadge.mqtt{color:#d6b8ff;background:rgba(175,82,222,.12);border:1px solid rgba(175,82,222,.30)}
 .connectionState{color:#91a2b4;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09)}
 .connectionState.online{color:#8ef0aa;border-color:rgba(48,209,88,.28);background:rgba(48,209,88,.08)}
 .connectionState.pending{color:#f2bd74;border-color:rgba(240,163,64,.28);background:rgba(240,163,64,.08)}
@@ -12201,6 +12203,8 @@
     var transport=inferredTransport(dev);
     if(transport==="bluetooth") return "Bluetooth";
     if(transport==="homebridge") return "Homebridge";
+    if(transport==="homeassistant") return "HA";
+    if(transport==="mqtt") return "MQTT";
     return "IR";
   }
 
